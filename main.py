@@ -82,8 +82,11 @@ PAGE_HTML = """
   .amount { font-weight:700; }
   .boost { display:inline-block; font-size:11px; color:#7c3aed; margin-top:6px; }
   .products { margin-top:12px; border-top:1px dashed var(--line); padding-top:10px; }
-  .prod { padding:8px 0; border-bottom:1px solid #f3f4f6; }
+  .prod { display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-bottom:1px solid #f3f4f6; }
   .prod:last-child { border-bottom:0; }
+  .thumb { width:46px; height:46px; border-radius:8px; object-fit:cover; flex:0 0 46px; background:#f1f2f4; }
+  .thumb.noimg { background:#eef0f3; }
+  .pinfo { flex:1; min-width:0; }
   .pname { font-size:13px; font-weight:600; }
   .price { font-size:12px; color:#444; margin-top:3px; }
   .strike { color:#9aa0a6; text-decoration:line-through; }
@@ -126,13 +129,16 @@ function products(list){
   if(!list || !list.length) return '';
   const rows = list.map(p => `
     <div class="prod">
-      <div class="pname">${p.name||'-'}</div>
-      <div class="price">
-        <span class="strike">${p.original_price||''}</span>
-        ${p.zvzo_discount ? ' − '+p.zvzo_discount : ''}
-        ${p.final_price ? ' → <span class="final">'+p.final_price+'</span>' : ''}
+      ${p.thumb ? '<img class="thumb" src="'+p.thumb+'" alt="">' : '<div class="thumb noimg"></div>'}
+      <div class="pinfo">
+        <div class="pname">${p.name||'-'}</div>
+        <div class="price">
+          <span class="strike">${p.original_price||''}</span>
+          ${p.zvzo_discount ? ' − '+p.zvzo_discount : ''}
+          ${p.final_price ? ' → <span class="final">'+p.final_price+'</span>' : ''}
+        </div>
+        ${p.commission ? '<div class="comm">커미션 '+p.commission+'</div>' : ''}
       </div>
-      ${p.commission ? '<div class="comm">커미션 '+p.commission+'</div>' : ''}
     </div>`).join('');
   return `<div class="products">${rows}</div>`;
 }
