@@ -1,9 +1,13 @@
 """
-ZVZO 진행 현황 대시보드 (방식 B).
-접속하면 자동으로 로그인→목록+상세 수집→셀러별 카드(상품/할인가 포함)를 보여준다.
+ZVZO 진행 현황 대시보드 (방식 B + 백그라운드 자동갱신).
+
+- 서버가 켜지면 즉시 1회 수집하고, 이후 REFRESH_MINUTES 마다 백그라운드로 자동 수집.
+- 사용자가 접속하면 '저장된 최신 결과'를 즉시 보여줌 (대기 0초).
+- '새로고침' 버튼은 즉시 다시 긁기(1~3분 소요).
 """
 
-import time
+import os
+import asyncio
 import datetime
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -13,18 +17,46 @@ from agent import extract_items
 
 app = FastAPI()
 
-_cache = {"items": None, "ts": 0.0, "diag": ""}
-CACHE_SECONDS = 600  # 10분 (상세 수집이 무거워서 캐시를 길게)
+REFRESH_MINUTES = int(os.environ.get("REFRESH_MINUTES", "30"))
+
+# 저장된 최신 결과
+_store = {
+    "items": None,
+    "diag": "",
+    "updated_at": None,   # datetime
+    "refreshing": False,  # 수집 진행중 여부
+    "error": "",
+}
 
 
-async def get_items(force: bool = False):
-    now = time.time()
-    if force or _cache["items"] is None or (now - _cache["ts"]) > CACHE_SECONDS:
+async def _collect():
+    """실제 수집(느림). 결과를 _store에 저장."""
+    if _store["refreshing"]:
+        return
+    _store["refreshing"] = True
+    try:
         data = await scrape_all()
-        _cache["items"] = extract_items(data)
-        _cache["diag"] = data.get("_진단", "")
-        _cache["ts"] = now
-    return _cache["items"], _cache["diag"]
+        _store["items"] = extract_items(data)
+        _store["diag"] = data.get("_진단", "")
+        _store["updated_at"] = datetime.datetime.now()
+        _store["error"] = ""
+    except Exception as e:
+        _store["error"] = str(e)
+    finally:
+        _store["refreshing"] = False
+
+
+async def _loop():
+    """서버 켜지면 즉시 1회 + 주기적으로 자동 수집."""
+    await _collect()
+    while True:
+        await asyncio.sleep(REFRESH_MINUTES * 60)
+        await _collect()
+
+
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(_loop())
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -33,16 +65,25 @@ def home():
 
 
 @app.get("/data")
-async def data(refresh: int = 0):
-    try:
-        items, diag = await get_items(force=bool(refresh))
-        return JSONResponse({
-            "today": datetime.date.today().isoformat(),
-            "items": items,
-            "diag": diag,
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e), "items": []})
+async def data():
+    ua = _store["updated_at"]
+    return JSONResponse({
+        "today": datetime.date.today().isoformat(),
+        "items": _store["items"] or [],
+        "diag": _store["diag"],
+        "error": _store["error"],
+        "refreshing": _store["refreshing"],
+        "updated_at": ua.strftime("%Y-%m-%d %H:%M") if ua else None,
+        "ready": _store["items"] is not None,
+    })
+
+
+@app.post("/refresh")
+async def refresh():
+    """지금 즉시 다시 긁기(백그라운드로 시작만 하고 바로 응답)."""
+    if not _store["refreshing"]:
+        asyncio.create_task(_collect())
+    return JSONResponse({"started": True})
 
 
 PAGE_HTML = """
@@ -56,15 +97,13 @@ PAGE_HTML = """
   :root { --line:#ececf0; --muted:#6b7280; --ink:#16181d; --blue:#2d6cdf;
           --green:#0f9d58; --amber:#b8860b; --chip:#eef2fb; }
   * { box-sizing:border-box; }
-  body { font-family:-apple-system,system-ui,"Apple SD Gothic Neo",sans-serif;
-         margin:0; background:#f7f8fa; color:var(--ink); }
+  body { font-family:-apple-system,system-ui,"Apple SD Gothic Neo",sans-serif; margin:0; background:#f7f8fa; color:var(--ink); }
   .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
   header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
   h1 { font-size:20px; margin:0; }
-  .date { color:var(--muted); font-size:14px; }
-  button.refresh { padding:9px 16px; border:0; border-radius:10px; background:var(--blue);
-           color:#fff; font-size:14px; cursor:pointer; }
-  button.refresh:disabled { background:#9bb6e8; }
+  .date { color:var(--muted); font-size:13px; margin-top:4px; }
+  .refresh { padding:9px 16px; border:0; border-radius:10px; background:var(--blue); color:#fff; font-size:14px; cursor:pointer; }
+  .refresh:disabled { background:#9bb6e8; cursor:default; }
   .summary { display:flex; gap:12px; flex-wrap:wrap; margin:18px 0; }
   .stat { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 18px; min-width:130px; }
   .stat .n { font-size:24px; font-weight:700; }
@@ -92,6 +131,8 @@ PAGE_HTML = """
   .strike { color:#9aa0a6; text-decoration:line-through; }
   .final { color:var(--blue); font-weight:700; }
   .comm { font-size:11px; color:var(--muted); margin-top:2px; }
+  .banner { background:#fff8e6; border:1px solid #f0e0b0; color:#8a6d00; font-size:13px;
+            border-radius:10px; padding:10px 14px; margin:14px 0; }
   #loading { text-align:center; color:var(--muted); padding:50px 0; line-height:1.7; }
   details { margin-top:24px; color:var(--muted); font-size:12px; }
   pre { white-space:pre-wrap; background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px; }
@@ -104,10 +145,12 @@ PAGE_HTML = """
       <h1>📊 ZVZO 진행 현황</h1>
       <div class="date" id="date"></div>
     </div>
-    <button class="refresh" id="refresh" onclick="load(true)">새로고침</button>
+    <button class="refresh" id="refresh" onclick="doRefresh()">지금 새로고침</button>
   </header>
 
-  <div id="loading">불러오는 중... 로그인 → 셀러별 상세까지 수집합니다.<br>처음/새로고침 시 <b>1~3분</b> 걸릴 수 있어요 ⏳</div>
+  <div id="banner" class="banner" style="display:none"></div>
+  <div id="loading">최신 데이터를 준비하는 중입니다... 잠시만요 ⏳</div>
+
   <div id="content" style="display:none">
     <div class="summary" id="summary"></div>
     <div class="section-title">🟢 진행중</div>
@@ -125,6 +168,8 @@ PAGE_HTML = """
 </div>
 
 <script>
+let pollTimer = null;
+
 function products(list){
   if(!list || !list.length) return '';
   const rows = list.map(p => `
@@ -160,42 +205,66 @@ function card(it){
   </div>`;
 }
 
-async function load(refresh){
-  const btn = document.getElementById('refresh');
-  btn.disabled = true;
-  document.getElementById('loading').style.display = 'block';
-  document.getElementById('content').style.display = 'none';
-  try {
-    const res = await fetch('/data?refresh=' + (refresh?1:0));
-    const d = await res.json();
-    document.getElementById('date').textContent = '오늘: ' + (d.today||'');
-    document.getElementById('diag').textContent = d.diag || d.error || '(없음)';
-    const items = d.items || [];
+function render(d){
+  document.getElementById('diag').textContent = d.diag || d.error || '(없음)';
+  const items = d.items || [];
+  const running = items.filter(x => (x.status||"").includes("진행중"));
+  const soon    = items.filter(x => (x.status||"").includes("진행예정"));
+  const other   = items.filter(x => !(x.status||"").includes("진행중") && !(x.status||"").includes("진행예정"));
 
-    const running = items.filter(x => (x.status||"").includes("진행중"));
-    const soon    = items.filter(x => (x.status||"").includes("진행예정"));
-    const other   = items.filter(x => !(x.status||"").includes("진행중") && !(x.status||"").includes("진행예정"));
-
-    document.getElementById('summary').innerHTML =
-      `<div class="stat"><div class="n">${items.length}</div><div class="l">전체 협업</div></div>
-       <div class="stat"><div class="n">${running.length}</div><div class="l">진행중</div></div>
-       <div class="stat"><div class="n">${soon.length}</div><div class="l">진행예정</div></div>`;
-
-    document.getElementById('running').innerHTML = running.map(card).join('') || '<div class="card">없음</div>';
-    document.getElementById('soon').innerHTML = soon.map(card).join('') || '<div class="card">없음</div>';
-    if (other.length){
-      document.getElementById('otherTitle').style.display = 'block';
-      document.getElementById('other').innerHTML = other.map(card).join('');
-    }
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('content').style.display = 'block';
-  } catch(e){
-    document.getElementById('loading').textContent = '오류: ' + e;
-  } finally {
-    btn.disabled = false;
+  document.getElementById('summary').innerHTML =
+    `<div class="stat"><div class="n">${items.length}</div><div class="l">전체 협업</div></div>
+     <div class="stat"><div class="n">${running.length}</div><div class="l">진행중</div></div>
+     <div class="stat"><div class="n">${soon.length}</div><div class="l">진행예정</div></div>`;
+  document.getElementById('running').innerHTML = running.map(card).join('') || '<div class="card">없음</div>';
+  document.getElementById('soon').innerHTML = soon.map(card).join('') || '<div class="card">없음</div>';
+  if (other.length){
+    document.getElementById('otherTitle').style.display='block';
+    document.getElementById('other').innerHTML = other.map(card).join('');
   }
 }
-load(false);
+
+async function poll(){
+  try {
+    const d = await (await fetch('/data')).json();
+    const btn = document.getElementById('refresh');
+    const banner = document.getElementById('banner');
+
+    document.getElementById('date').textContent =
+      (d.updated_at ? '마지막 갱신: ' + d.updated_at : '아직 수집 전') + ' · 오늘 ' + (d.today||'');
+
+    if (d.ready){
+      render(d);
+      document.getElementById('loading').style.display='none';
+      document.getElementById('content').style.display='block';
+    }
+
+    if (d.refreshing){
+      btn.disabled = true; btn.textContent = '수집 중...';
+      banner.style.display='block';
+      banner.textContent = d.ready
+        ? '🔄 백그라운드에서 최신 데이터를 다시 수집하는 중입니다. (기존 데이터 표시 중)'
+        : '⏳ 첫 수집 중입니다. 1~3분 정도 걸려요. 끝나면 자동으로 나타납니다.';
+    } else {
+      btn.disabled = false; btn.textContent = '지금 새로고침';
+      banner.style.display='none';
+      if (!d.ready && d.error){
+        document.getElementById('loading').textContent = '오류: ' + d.error;
+      }
+    }
+  } catch(e){
+    // 무시하고 다음 폴링
+  }
+}
+
+async function doRefresh(){
+  await fetch('/refresh', {method:'POST'});
+  poll();
+}
+
+// 2초마다 상태 확인 (수집 끝나면 자동 표시)
+poll();
+pollTimer = setInterval(poll, 2000);
 </script>
 </body>
 </html>
