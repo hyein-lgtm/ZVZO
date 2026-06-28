@@ -1,6 +1,6 @@
 """
-ZVZO 진행 현황 대시보드.
-접속하면 자동으로 로그인→목록 긁기→오늘 기준 진행 현황을 카드로 보여준다.
+ZVZO 진행 현황 대시보드 (방식 B).
+접속하면 자동으로 로그인→목록+상세 수집→셀러별 카드(상품/할인가 포함)를 보여준다.
 """
 
 import time
@@ -14,7 +14,7 @@ from agent import extract_items
 app = FastAPI()
 
 _cache = {"items": None, "ts": 0.0, "diag": ""}
-CACHE_SECONDS = 300  # 5분
+CACHE_SECONDS = 600  # 10분 (상세 수집이 무거워서 캐시를 길게)
 
 
 async def get_items(force: bool = False):
@@ -53,36 +53,43 @@ PAGE_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZVZO 진행 현황</title>
 <style>
-  :root { --bg:#fff; --line:#ececf0; --muted:#6b7280; --ink:#16181d;
-          --blue:#2d6cdf; --green:#0f9d58; --amber:#b8860b; --chip:#eef2fb; }
-  * { box-sizing: border-box; }
+  :root { --line:#ececf0; --muted:#6b7280; --ink:#16181d; --blue:#2d6cdf;
+          --green:#0f9d58; --amber:#b8860b; --chip:#eef2fb; }
+  * { box-sizing:border-box; }
   body { font-family:-apple-system,system-ui,"Apple SD Gothic Neo",sans-serif;
          margin:0; background:#f7f8fa; color:var(--ink); }
   .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
   header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
   h1 { font-size:20px; margin:0; }
   .date { color:var(--muted); font-size:14px; }
-  button { padding:9px 16px; border:0; border-radius:10px; background:var(--blue);
+  button.refresh { padding:9px 16px; border:0; border-radius:10px; background:var(--blue);
            color:#fff; font-size:14px; cursor:pointer; }
-  button:disabled { background:#9bb6e8; }
+  button.refresh:disabled { background:#9bb6e8; }
   .summary { display:flex; gap:12px; flex-wrap:wrap; margin:18px 0; }
-  .stat { background:#fff; border:1px solid var(--line); border-radius:14px;
-          padding:14px 18px; min-width:140px; }
+  .stat { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 18px; min-width:130px; }
   .stat .n { font-size:24px; font-weight:700; }
   .stat .l { font-size:13px; color:var(--muted); margin-top:2px; }
   .section-title { font-size:15px; font-weight:700; margin:22px 0 10px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
   .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; }
   .card .top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .seller { font-weight:700; font-size:15px; }
-  .badge { font-size:11px; padding:3px 8px; border-radius:999px; background:var(--chip); color:var(--blue); }
+  .badge { font-size:11px; padding:3px 8px; border-radius:999px; background:var(--chip); color:var(--blue); white-space:nowrap; }
   .badge.run { background:#e7f6ee; color:var(--green); }
   .badge.soon { background:#fef3e2; color:var(--amber); }
   .row { display:flex; justify-content:space-between; font-size:13px; margin-top:8px; color:#333; }
   .row .k { color:var(--muted); }
   .amount { font-weight:700; }
   .boost { display:inline-block; font-size:11px; color:#7c3aed; margin-top:6px; }
-  #loading { text-align:center; color:var(--muted); padding:50px 0; }
+  .products { margin-top:12px; border-top:1px dashed var(--line); padding-top:10px; }
+  .prod { padding:8px 0; border-bottom:1px solid #f3f4f6; }
+  .prod:last-child { border-bottom:0; }
+  .pname { font-size:13px; font-weight:600; }
+  .price { font-size:12px; color:#444; margin-top:3px; }
+  .strike { color:#9aa0a6; text-decoration:line-through; }
+  .final { color:var(--blue); font-weight:700; }
+  .comm { font-size:11px; color:var(--muted); margin-top:2px; }
+  #loading { text-align:center; color:var(--muted); padding:50px 0; line-height:1.7; }
   details { margin-top:24px; color:var(--muted); font-size:12px; }
   pre { white-space:pre-wrap; background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px; }
 </style>
@@ -94,10 +101,10 @@ PAGE_HTML = """
       <h1>📊 ZVZO 진행 현황</h1>
       <div class="date" id="date"></div>
     </div>
-    <button id="refresh" onclick="load(true)">새로고침</button>
+    <button class="refresh" id="refresh" onclick="load(true)">새로고침</button>
   </header>
 
-  <div id="loading">불러오는 중... (로그인→목록 수집, 10~20초) ⏳</div>
+  <div id="loading">불러오는 중... 로그인 → 셀러별 상세까지 수집합니다.<br>처음/새로고침 시 <b>1~3분</b> 걸릴 수 있어요 ⏳</div>
   <div id="content" style="display:none">
     <div class="summary" id="summary"></div>
     <div class="section-title">🟢 진행중</div>
@@ -115,6 +122,21 @@ PAGE_HTML = """
 </div>
 
 <script>
+function products(list){
+  if(!list || !list.length) return '';
+  const rows = list.map(p => `
+    <div class="prod">
+      <div class="pname">${p.name||'-'}</div>
+      <div class="price">
+        <span class="strike">${p.original_price||''}</span>
+        ${p.zvzo_discount ? ' − '+p.zvzo_discount : ''}
+        ${p.final_price ? ' → <span class="final">'+p.final_price+'</span>' : ''}
+      </div>
+      ${p.commission ? '<div class="comm">커미션 '+p.commission+'</div>' : ''}
+    </div>`).join('');
+  return `<div class="products">${rows}</div>`;
+}
+
 function card(it){
   const st = (it.status||"").includes("진행중") ? "run"
            : (it.status||"").includes("진행예정") ? "soon" : "";
@@ -128,6 +150,7 @@ function card(it){
     <div class="row"><span class="k">판매금액</span><span class="amount">${it.amount||"-"}</span></div>
     <div class="row"><span class="k">상품</span><span>${it.product_count||"-"}</span></div>
     <div class="row"><span class="k">할인</span><span>${it.discount_rate||"-"} · ${it.discount_type||"-"}</span></div>
+    ${products(it.products)}
   </div>`;
 }
 
