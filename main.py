@@ -17,6 +17,7 @@ REFRESH_MINUTES = int(os.environ.get("REFRESH_MINUTES", "30"))
 
 _store = {
     "items": None, "summary": {}, "diag": "",
+    "daily_sales": {}, "monthly_sales": {},
     "updated_at": None, "refreshing": False, "error": "",
 }
 
@@ -30,6 +31,8 @@ async def _collect():
         result = extract_items(data)
         _store["items"] = result.get("items", [])
         _store["summary"] = result.get("summary", {})
+        _store["daily_sales"] = result.get("daily_sales", {})
+        _store["monthly_sales"] = result.get("monthly_sales", {})
         _store["diag"] = data.get("_진단", "")
         _store["updated_at"] = datetime.datetime.now()
         _store["error"] = ""
@@ -63,6 +66,8 @@ async def data():
         "today": datetime.date.today().isoformat(),
         "items": _store["items"] or [],
         "summary": _store["summary"] or {},
+        "daily_sales": _store["daily_sales"] or {},
+        "monthly_sales": _store["monthly_sales"] or {},
         "diag": _store["diag"],
         "error": _store["error"],
         "refreshing": _store["refreshing"],
@@ -239,22 +244,34 @@ function renderMonth(){
     .filter(it => monthOf(it) === activeMonth)
     .sort((a,b) => (a.period_start||"").localeCompare(b.period_start||""));
 
-  // 선택한 달 기준 매출 통계
-  const monthSales = list.reduce((sum,it)=> sum + wonToInt(it.amount), 0);
-  const runList = list.filter(it => (it.status||"").includes("진행중"));
-  const runSales = runList.reduce((sum,it)=> sum + wonToInt(it.amount), 0);
+  // 선택한 달 기준 실매출 (매출 통계 페이지 기반)
+  const ms = (DATA.monthly_sales || {})[activeMonth] || null;
+  const todaySales = (DATA.daily_sales || {})[DATA.today] || null;
 
-  document.getElementById('sales').innerHTML =
+  let salesHTML;
+  if (ms){
+    salesHTML =
     `<div class="scard main">
-       <div class="l">${monthLabel(activeMonth)} 시작 협업 판매금액</div>
-       <div class="v">${won(monthSales)}</div>
-       <div class="s">이 달에 시작하는 협업 ${list.length}건의 누적 판매금액 합계</div>
+       <div class="l">${monthLabel(activeMonth)} 실매출</div>
+       <div class="v">${won(ms.sales)}</div>
+       <div class="s">주문 ${ (ms.orders||0).toLocaleString('ko-KR') }건 · 매출통계 기준(1일~)</div>
      </div>
      <div class="scard run">
-       <div class="l">${monthLabel(activeMonth)} 진행중 판매금액</div>
-       <div class="v">${won(runSales)}</div>
-       <div class="s">진행중 ${runList.length}건</div>
+       <div class="l">오늘 매출 (${DATA.today})</div>
+       <div class="v">${ todaySales ? won(todaySales.sales) : '—' }</div>
+       <div class="s">${ todaySales ? '주문 '+todaySales.orders+'건' : '오늘 데이터 없음' }</div>
      </div>`;
+  } else {
+    // 매출통계가 없으면 협업 누적합으로 폴백
+    const monthSales = list.reduce((s,it)=> s + wonToInt(it.amount), 0);
+    salesHTML =
+    `<div class="scard main">
+       <div class="l">${monthLabel(activeMonth)} 시작 협업 판매금액(누적)</div>
+       <div class="v">${won(monthSales)}</div>
+       <div class="s">매출 통계를 못 불러와 협업 누적합으로 표시 중</div>
+     </div>`;
+  }
+  document.getElementById('sales').innerHTML = salesHTML;
 
   document.getElementById('mhead').textContent =
     `${monthLabel(activeMonth)}에 시작하는 협업 ${list.length}건 (시작일 빠른 순)`;

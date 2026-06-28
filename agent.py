@@ -103,11 +103,20 @@ def extract_items(scraped_data: dict) -> dict:
     for i, it in enumerate(items):
         it["products"] = parsed_products[i] if i < len(parsed_products) else []
 
-    # 4) 매출 합산
+    # 4) 협업 판매금액(누적) 합산 - 보조지표
     total = sum(_won_to_int(it.get("amount", "")) for it in items)
     running_total = sum(
         _won_to_int(it.get("amount", "")) for it in items if "진행중" in (it.get("status", ""))
     )
+
+    # 5) 매출 통계(일자별) 파싱 → 일자별/월별 실매출
+    daily = _parse_report(scraped_data.get("매출통계", ""))
+    monthly = {}
+    for day, info in daily.items():
+        m = day[:7]
+        b = monthly.setdefault(m, {"sales": 0, "orders": 0})
+        b["sales"] += info["sales"]
+        b["orders"] += info["orders"]
 
     return {
         "items": items,
@@ -118,4 +127,36 @@ def extract_items(scraped_data: dict) -> dict:
             "running_count": sum(1 for it in items if "진행중" in (it.get("status", ""))),
             "soon_count": sum(1 for it in items if "진행예정" in (it.get("status", ""))),
         },
+        "daily_sales": daily,       # {"2026-06-28": {"sales":530838,"orders":22}, ...}
+        "monthly_sales": monthly,   # {"2026-06": {"sales":..., "orders":...}, ...}
     }
+
+
+def _parse_report(report_text):
+    """
+    매출 통계 페이지 텍스트에서 (날짜, 주문합계, 주문수)를 추출.
+    행 패턴: '2026-06-28  345  62  22  24  530838  다운로드' 같이
+    날짜 뒤에 숫자들이 이어진다. 마지막 큰 숫자를 '주문합계(매출)'로,
+    주문수는 LLM 없이 휴리스틱으로 잡는다.
+    반환: {"YYYY-MM-DD": {"sales": int, "orders": int}}
+    """
+    import re
+    result = {}
+    if not report_text:
+        return result
+    # 날짜로 시작하는 토막을 찾기 위해, 날짜 위치 기준으로 분할
+    # 한 줄에 날짜+숫자들이 공백/줄바꿈으로 섞여 있을 수 있어 정규식으로 처리
+    # 날짜 + 그 뒤 첫 6개 숫자(상품조회,쇼핑몰조회,주문수,품목수,주문합계) 가정
+    pattern = re.compile(
+        r"(\d{4}-\d{2}-\d{2})\s+"
+        r"([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)"
+    )
+    for m in pattern.finditer(report_text):
+        day = m.group(1)
+        try:
+            orders = int(m.group(4).replace(",", ""))     # 주문 수
+            sales = int(m.group(6).replace(",", ""))      # 주문 합계(매출)
+        except Exception:
+            continue
+        result[day] = {"sales": sales, "orders": orders}
+    return result
