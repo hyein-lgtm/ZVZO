@@ -91,40 +91,83 @@ async def _grab_products(page):
 
 
 async def _grab_report(page, log):
-    """매출 통계 페이지에서 헤더 + 각 행 셀들을 구조적으로 수집."""
+    """매출 통계 페이지: 조회기간을 이번달 1일~오늘로 설정 + 검색 후 헤더/행 수집."""
     try:
         await page.goto(REPORT_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(2800)
+        await page.wait_for_timeout(2500)
 
-        # 표 헤더와 행을 JS로 직접 추출 (table 우선, 없으면 grid/role 기반)
+        today = datetime.date.today()
+        first = today.replace(day=1)
+        start_str = first.isoformat()           # YYYY-MM-01
+        end_str = today.isoformat()
+
+        # 1) 날짜 입력칸에 기간 설정 시도 (date input 우선, 없으면 텍스트형)
+        try:
+            date_inputs = page.locator("input[type=date]")
+            if await date_inputs.count() >= 2:
+                await date_inputs.nth(0).fill(start_str)
+                await date_inputs.nth(1).fill(end_str)
+                log.append(f"조회기간 설정 {start_str}~{end_str}")
+            else:
+                # 텍스트형 입력칸: placeholder/value 패턴으로 추정
+                tis = page.locator("input")
+                # 'YYYY-MM-DD' 값을 가진 input 들을 찾아 채움
+                cand = []
+                for k in range(await tis.count()):
+                    v = await tis.nth(k).input_value()
+                    if v and len(v) >= 8 and "-" in v:
+                        cand.append(k)
+                if len(cand) >= 2:
+                    await tis.nth(cand[0]).fill(start_str)
+                    await tis.nth(cand[1]).fill(end_str)
+                    log.append(f"조회기간(텍스트) 설정 {start_str}~{end_str}")
+        except Exception as e:
+            log.append(f"조회기간 설정 실패(무시): {str(e)[:50]}")
+
+        # 2) 검색 버튼 클릭
+        try:
+            btn = page.locator("button:has-text('검색')").first
+            if await btn.count() > 0:
+                await btn.click()
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await page.wait_for_timeout(2000)
+                log.append("검색 클릭")
+        except Exception as e:
+            log.append(f"검색 클릭 실패(무시): {str(e)[:50]}")
+
+        # 3) '200개씩 보기'가 있으면 선택해 페이지 분할 방지
+        try:
+            sel = page.locator("select").first
+            if await sel.count() > 0:
+                await sel.select_option(label="200개씩 보기")
+                await page.wait_for_timeout(1500)
+                log.append("200개씩 보기 적용")
+        except Exception:
+            pass
+
+        # 4) 헤더 + 행 구조 추출
         data = await page.evaluate(r"""
         () => {
-          // 1) 표준 table 우선
           const table = document.querySelector('table');
           if (table) {
-            const ths = Array.from(table.querySelectorAll('thead th, thead td'))
-                          .map(e => e.innerText.trim());
+            const ths = Array.from(table.querySelectorAll('thead th, thead td')).map(e=>e.innerText.trim());
             const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
-              Array.from(tr.querySelectorAll('td,th')).map(td => td.innerText.trim())
-            );
+              Array.from(tr.querySelectorAll('td,th')).map(td=>td.innerText.trim()));
             if (rows.length) return { headers: ths, rows };
           }
-          // 2) role=row / gridcell 기반
           const rowsEl = Array.from(document.querySelectorAll('[role=row]'));
           if (rowsEl.length) {
             const all = rowsEl.map(r =>
-              Array.from(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],th,td'))
-                   .map(c => c.innerText.trim())
-            ).filter(a => a.length);
+              Array.from(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],th,td')).map(c=>c.innerText.trim())
+            ).filter(a=>a.length);
             if (all.length) return { headers: all[0], rows: all.slice(1) };
           }
-          // 3) 실패 시 전체 텍스트
           return { headers: [], rows: [], text: document.body.innerText };
         }
         """)
         hcnt = len(data.get("headers", []))
         rcnt = len(data.get("rows", []))
-        log.append(f"매출 통계 수집: 헤더 {hcnt}개, 행 {rcnt}개")
+        log.append(f"매출 통계: 헤더 {hcnt}개, 행 {rcnt}개, 헤더={data.get('headers', [])}")
         return data
     except Exception as e:
         log.append(f"매출 통계 실패: {str(e)[:60]}")

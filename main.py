@@ -252,11 +252,14 @@ function renderMonth(){
   let salesHTML;
   if (ms){
     const sm2 = DATA.summary || {};
+    // 이 달 수집된 날짜 범위 (1일부터 잡혔는지 검증용)
+    const days = Object.keys(DATA.daily_sales||{}).filter(d => d.slice(0,7)===activeMonth).sort();
+    const cover = days.length ? `${days[0]} ~ ${days[days.length-1]} · ${days.length}일치` : '날짜 데이터 없음';
     salesHTML =
     `<div class="scard main">
        <div class="l">${monthLabel(activeMonth)} 순매출 (취소 제외)</div>
        <div class="v">${won(ms.net)}</div>
-       <div class="s">주문합계 ${won(ms.sales)} − 취소 ${won(ms.cancel)} · 주문 ${(ms.orders||0).toLocaleString('ko-KR')}건</div>
+       <div class="s">주문합계 ${won(ms.sales)} − 취소 ${won(ms.cancel)} · 수집: ${cover}</div>
      </div>
      <div class="scard fee">
        <div class="l">${monthLabel(activeMonth)} 예상 수수료</div>
