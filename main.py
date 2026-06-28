@@ -19,10 +19,10 @@ _cache = {"data": None, "ts": 0.0}
 CACHE_SECONDS = 300  # 5분
 
 
-def get_data(force: bool = False) -> dict:
+async def get_data(force: bool = False) -> dict:
     now = time.time()
     if force or _cache["data"] is None or (now - _cache["ts"]) > CACHE_SECONDS:
-        _cache["data"] = scrape_all()
+        _cache["data"] = await scrape_all()
         _cache["ts"] = now
     return _cache["data"]
 
@@ -40,7 +40,7 @@ async def ask(request: Request):
     if not question:
         return JSONResponse({"reply": "질문을 입력해 주세요."})
     try:
-        data = get_data(force=force)
+        data = await get_data(force=force)
         reply = answer(question, data)
     except Exception as e:
         reply = f"오류가 발생했어요: {e}"

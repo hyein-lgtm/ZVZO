@@ -1,5 +1,5 @@
 """
-ZVZO 벤더 관리자에 자동 로그인해서 화면 텍스트를 긁어오는 모듈.
+ZVZO 벤더 관리자에 자동 로그인해서 화면 텍스트를 긁어오는 모듈. (비동기 버전)
 
 ★ 당신이 만질 곳은 아래 '설정' 부분뿐입니다.
    - ZVZO_LOGIN_URL : 로그인 페이지 주소
@@ -8,7 +8,7 @@ ZVZO 벤더 관리자에 자동 로그인해서 화면 텍스트를 긁어오는
 """
 
 import os
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 # ─────────────────────────────────────────────
 # 설정 (여기만 수정하세요)
@@ -27,70 +27,63 @@ TARGET_PAGES = {
 # ─────────────────────────────────────────────
 
 
-def _try_fill(page, selectors, value):
+async def _try_fill(page, selectors, value):
     """여러 후보 셀렉터 중 처음 잡히는 입력칸에 값을 넣는다."""
     for sel in selectors:
         loc = page.locator(sel).first
-        if loc.count() > 0:
-            loc.fill(value)
+        if await loc.count() > 0:
+            await loc.fill(value)
             return True
     return False
 
 
-def _try_click(page, selectors):
+async def _try_click(page, selectors):
     for sel in selectors:
         loc = page.locator(sel).first
-        if loc.count() > 0:
-            loc.click()
+        if await loc.count() > 0:
+            await loc.click()
             return True
     return False
 
 
-def scrape_all() -> dict:
+async def scrape_all() -> dict:
     """로그인 후 TARGET_PAGES의 화면 텍스트를 모아서 dict로 반환."""
     results = {}
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = browser.new_context(locale="ko-KR").new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = await browser.new_context(locale="ko-KR")
+        page = await context.new_page()
 
         # 1) 로그인 페이지 열기
-        page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+        await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
 
         # 2) 아이디/비밀번호 입력 (대부분 이 셀렉터들로 자동으로 잡힙니다)
-        _try_fill(page, [
+        await _try_fill(page, [
             "input[type=email]",
             "input[name*='user' i]",
             "input[name*='id' i]",
             "input[type=text]",
         ], USERNAME)
-        _try_fill(page, ["input[type=password]"], PASSWORD)
+        await _try_fill(page, ["input[type=password]"], PASSWORD)
 
         # 3) 로그인 버튼 클릭
-        _try_click(page, [
+        await _try_click(page, [
             "button:has-text('로그인')",
             "button[type=submit]",
             "input[type=submit]",
             "a:has-text('로그인')",
         ])
-        page.wait_for_load_state("networkidle", timeout=60000)
-        page.wait_for_timeout(1500)  # 화면 그려질 시간
+        await page.wait_for_load_state("networkidle", timeout=60000)
+        await page.wait_for_timeout(1500)  # 화면 그려질 시간
 
         # 4) 각 화면 텍스트 수집
         for name, url in TARGET_PAGES.items():
             try:
-                page.goto(url, wait_until="networkidle", timeout=60000)
-                page.wait_for_timeout(2000)
-                results[name] = page.inner_text("body")
+                await page.goto(url, wait_until="networkidle", timeout=60000)
+                await page.wait_for_timeout(2000)
+                results[name] = await page.inner_text("body")
             except Exception as e:
                 results[name] = f"(이 화면 수집 실패: {e})"
 
-        browser.close()
+        await browser.close()
     return results
-
-
-# 직접 실행해서 테스트할 때: python scraper.py
-if __name__ == "__main__":
-    data = scrape_all()
-    for k, v in data.items():
-        print(f"\n===== {k} =====")
-        print(v[:1000])
