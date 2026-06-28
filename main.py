@@ -1,9 +1,5 @@
 """
-ZVZO 진행 현황 대시보드 (방식 B + 백그라운드 자동갱신).
-
-- 서버가 켜지면 즉시 1회 수집하고, 이후 REFRESH_MINUTES 마다 백그라운드로 자동 수집.
-- 사용자가 접속하면 '저장된 최신 결과'를 즉시 보여줌 (대기 0초).
-- '새로고침' 버튼은 즉시 다시 긁기(1~3분 소요).
+ZVZO 진행 현황 대시보드 (월별 탭 + 시작일 정렬 + 백그라운드 자동갱신).
 """
 
 import os
@@ -19,19 +15,13 @@ app = FastAPI()
 
 REFRESH_MINUTES = int(os.environ.get("REFRESH_MINUTES", "30"))
 
-# 저장된 최신 결과
 _store = {
-    "items": None,
-    "summary": {},
-    "diag": "",
-    "updated_at": None,   # datetime
-    "refreshing": False,  # 수집 진행중 여부
-    "error": "",
+    "items": None, "summary": {}, "diag": "",
+    "updated_at": None, "refreshing": False, "error": "",
 }
 
 
 async def _collect():
-    """실제 수집(느림). 결과를 _store에 저장."""
     if _store["refreshing"]:
         return
     _store["refreshing"] = True
@@ -50,7 +40,6 @@ async def _collect():
 
 
 async def _loop():
-    """서버 켜지면 즉시 1회 + 주기적으로 자동 수집."""
     await _collect()
     while True:
         await asyncio.sleep(REFRESH_MINUTES * 60)
@@ -84,7 +73,6 @@ async def data():
 
 @app.post("/refresh")
 async def refresh():
-    """지금 즉시 다시 긁기(백그라운드로 시작만 하고 바로 응답)."""
     if not _store["refreshing"]:
         asyncio.create_task(_collect())
     return JSONResponse({"started": True})
@@ -108,22 +96,24 @@ PAGE_HTML = """
   .date { color:var(--muted); font-size:13px; margin-top:4px; }
   .refresh { padding:9px 16px; border:0; border-radius:10px; background:var(--blue); color:#fff; font-size:14px; cursor:pointer; }
   .refresh:disabled { background:#9bb6e8; cursor:default; }
-  .summary { display:flex; gap:12px; flex-wrap:wrap; margin:18px 0; }
-  .stat { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 18px; min-width:130px; }
-  .stat .n { font-size:24px; font-weight:700; }
-  .stat .l { font-size:13px; color:var(--muted); margin-top:2px; }
-  .sales { display:flex; gap:12px; flex-wrap:wrap; margin:16px 0 6px; }
+  .sales { display:flex; gap:12px; flex-wrap:wrap; margin:16px 0; }
   .scard { flex:1; min-width:200px; border-radius:16px; padding:18px 20px; color:#fff; }
   .scard.main { background:linear-gradient(135deg,#2d6cdf,#5b8def); }
   .scard.run { background:linear-gradient(135deg,#0f9d58,#3cbb7f); }
   .scard .l { font-size:13px; opacity:.9; }
   .scard .v { font-size:26px; font-weight:800; margin-top:4px; }
   .scard .s { font-size:12px; opacity:.85; margin-top:4px; }
-  .section-title { font-size:15px; font-weight:700; margin:22px 0 10px; }
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin:18px 0 6px; border-bottom:1px solid var(--line); padding-bottom:10px; }
+  .tab { padding:8px 14px; border-radius:999px; border:1px solid var(--line); background:#fff;
+         font-size:14px; cursor:pointer; color:#444; }
+  .tab.active { background:var(--blue); color:#fff; border-color:var(--blue); font-weight:700; }
+  .tab .cnt { font-size:12px; opacity:.8; margin-left:4px; }
+  .mhead { font-size:14px; color:var(--muted); margin:14px 0 10px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
   .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; }
   .card .top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .seller { font-weight:700; font-size:15px; }
+  .dday { font-size:11px; color:var(--muted); margin-left:6px; }
   .badge { font-size:11px; padding:3px 8px; border-radius:999px; background:var(--chip); color:var(--blue); white-space:nowrap; }
   .badge.run { background:#e7f6ee; color:var(--green); }
   .badge.soon { background:#fef3e2; color:var(--amber); }
@@ -164,13 +154,9 @@ PAGE_HTML = """
 
   <div id="content" style="display:none">
     <div class="sales" id="sales"></div>
-    <div class="summary" id="summary"></div>
-    <div class="section-title">🟢 진행중</div>
-    <div class="grid" id="running"></div>
-    <div class="section-title">🟡 진행예정</div>
-    <div class="grid" id="soon"></div>
-    <div class="section-title" id="otherTitle" style="display:none">기타</div>
-    <div class="grid" id="other"></div>
+    <div class="tabs" id="tabs"></div>
+    <div class="mhead" id="mhead"></div>
+    <div class="grid" id="grid"></div>
   </div>
 
   <details>
@@ -180,7 +166,30 @@ PAGE_HTML = """
 </div>
 
 <script>
-let pollTimer = null;
+let DATA = { items: [], summary: {}, today: "" };
+let activeMonth = null;
+
+function won(n){ return (n||0).toLocaleString('ko-KR') + '원'; }
+
+function monthOf(it){
+  const s = (it.period_start||"").slice(0,7);  // YYYY-MM
+  return /^\\d{4}-\\d{2}$/.test(s) ? s : "기타";
+}
+function monthLabel(m){
+  if(m==="기타") return "날짜미정";
+  const [y,mm] = m.split("-");
+  return `${y}년 ${parseInt(mm)}월`;
+}
+function dday(it){
+  const s = it.period_start;
+  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(s||"")) return "";
+  const today = new Date(DATA.today);
+  const start = new Date(s);
+  const diff = Math.round((start - today)/86400000);
+  if(diff>0) return `D-${diff}`;
+  if(diff===0) return "오늘 시작";
+  return "진행중";
+}
 
 function products(list){
   if(!list || !list.length) return '';
@@ -205,7 +214,7 @@ function card(it){
            : (it.status||"").includes("진행예정") ? "soon" : "";
   return `<div class="card">
     <div class="top">
-      <span class="seller">${it.seller||"-"}</span>
+      <span><span class="seller">${it.seller||"-"}</span><span class="dday">${dday(it)}</span></span>
       <span class="badge ${st}">${it.status||"-"}</span>
     </div>
     ${it.boost ? '<span class="boost">⚡ ZVZO 부스트 참여</span>' : ''}
@@ -217,39 +226,71 @@ function card(it){
   </div>`;
 }
 
-function won(n){ return (n||0).toLocaleString('ko-KR') + '원'; }
+function wonToInt(text){
+  if(!text) return 0;
+  const m = (text.match(/[\\d,]+/g)||[]);
+  if(!m.length) return 0;
+  return parseInt(m[0].replace(/,/g,'')) || 0;
+}
+
+function renderMonth(){
+  const grid = document.getElementById('grid');
+  const list = DATA.items
+    .filter(it => monthOf(it) === activeMonth)
+    .sort((a,b) => (a.period_start||"").localeCompare(b.period_start||""));
+
+  // 선택한 달 기준 매출 통계
+  const monthSales = list.reduce((sum,it)=> sum + wonToInt(it.amount), 0);
+  const runList = list.filter(it => (it.status||"").includes("진행중"));
+  const runSales = runList.reduce((sum,it)=> sum + wonToInt(it.amount), 0);
+
+  document.getElementById('sales').innerHTML =
+    `<div class="scard main">
+       <div class="l">${monthLabel(activeMonth)} 시작 협업 판매금액</div>
+       <div class="v">${won(monthSales)}</div>
+       <div class="s">이 달에 시작하는 협업 ${list.length}건의 누적 판매금액 합계</div>
+     </div>
+     <div class="scard run">
+       <div class="l">${monthLabel(activeMonth)} 진행중 판매금액</div>
+       <div class="v">${won(runSales)}</div>
+       <div class="s">진행중 ${runList.length}건</div>
+     </div>`;
+
+  document.getElementById('mhead').textContent =
+    `${monthLabel(activeMonth)}에 시작하는 협업 ${list.length}건 (시작일 빠른 순)`;
+  grid.innerHTML = list.map(card).join('') || '<div class="card">해당 월에 시작하는 협업이 없습니다.</div>';
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.m === activeMonth);
+  });
+}
 
 function render(d){
+  DATA = d;
   document.getElementById('diag').textContent = d.diag || d.error || '(없음)';
   const items = d.items || [];
   const sm = d.summary || {};
 
-  document.getElementById('sales').innerHTML =
-    `<div class="scard main">
-       <div class="l">이번 달 총 판매금액</div>
-       <div class="v">${won(sm.total_sales)}</div>
-       <div class="s">진행중 + 진행예정 합계</div>
-     </div>
-     <div class="scard run">
-       <div class="l">진행중 판매금액</div>
-       <div class="v">${won(sm.running_sales)}</div>
-       <div class="s">현재 판매중인 협업 ${sm.running_count||0}건</div>
-     </div>`;
+  // 월 목록 만들기 (시작일 기준)
+  const counts = {};
+  items.forEach(it => { const m = monthOf(it); counts[m] = (counts[m]||0)+1; });
+  const months = Object.keys(counts).sort();  // YYYY-MM 오름차순, '기타'는 뒤로
 
-  const running = items.filter(x => (x.status||"").includes("진행중"));
-  const soon    = items.filter(x => (x.status||"").includes("진행예정"));
-  const other   = items.filter(x => !(x.status||"").includes("진행중") && !(x.status||"").includes("진행예정"));
-
-  document.getElementById('summary').innerHTML =
-    `<div class="stat"><div class="n">${items.length}</div><div class="l">전체 협업</div></div>
-     <div class="stat"><div class="n">${running.length}</div><div class="l">진행중</div></div>
-     <div class="stat"><div class="n">${soon.length}</div><div class="l">진행예정</div></div>`;
-  document.getElementById('running').innerHTML = running.map(card).join('') || '<div class="card">없음</div>';
-  document.getElementById('soon').innerHTML = soon.map(card).join('') || '<div class="card">없음</div>';
-  if (other.length){
-    document.getElementById('otherTitle').style.display='block';
-    document.getElementById('other').innerHTML = other.map(card).join('');
+  // 기본 선택: 오늘이 속한 달 → 없으면 첫 달
+  const curMonth = (d.today||"").slice(0,7);
+  if(!activeMonth || !counts[activeMonth]){
+    activeMonth = counts[curMonth] ? curMonth : (months[0] || "기타");
   }
+
+  document.getElementById('tabs').innerHTML = months.map(m =>
+    `<button class="tab" data-m="${m}" onclick="selectMonth('${m}')">${monthLabel(m)}<span class="cnt">${counts[m]}</span></button>`
+  ).join('');
+
+  renderMonth();
+}
+
+function selectMonth(m){
+  activeMonth = m;
+  renderMonth();
 }
 
 async function poll(){
@@ -257,22 +298,19 @@ async function poll(){
     const d = await (await fetch('/data')).json();
     const btn = document.getElementById('refresh');
     const banner = document.getElementById('banner');
-
     document.getElementById('date').textContent =
       (d.updated_at ? '마지막 갱신: ' + d.updated_at : '아직 수집 전') + ' · 오늘 ' + (d.today||'');
-
     if (d.ready){
       render(d);
       document.getElementById('loading').style.display='none';
       document.getElementById('content').style.display='block';
     }
-
     if (d.refreshing){
       btn.disabled = true; btn.textContent = '수집 중...';
       banner.style.display='block';
       banner.textContent = d.ready
-        ? '🔄 백그라운드에서 최신 데이터를 다시 수집하는 중입니다. (기존 데이터 표시 중)'
-        : '⏳ 첫 수집 중입니다. 1~3분 정도 걸려요. 끝나면 자동으로 나타납니다.';
+        ? '🔄 백그라운드에서 최신 데이터를 수집하는 중입니다. (기존 데이터 표시 중)'
+        : '⏳ 첫 수집 중입니다. 1~3분 걸려요. 끝나면 자동으로 나타납니다.';
     } else {
       btn.disabled = false; btn.textContent = '지금 새로고침';
       banner.style.display='none';
@@ -280,9 +318,7 @@ async function poll(){
         document.getElementById('loading').textContent = '오류: ' + d.error;
       }
     }
-  } catch(e){
-    // 무시하고 다음 폴링
-  }
+  } catch(e){}
 }
 
 async function doRefresh(){
@@ -290,9 +326,8 @@ async function doRefresh(){
   poll();
 }
 
-// 2초마다 상태 확인 (수집 끝나면 자동 표시)
 poll();
-pollTimer = setInterval(poll, 2000);
+setInterval(poll, 2000);
 </script>
 </body>
 </html>
