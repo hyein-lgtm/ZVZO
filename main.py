@@ -22,6 +22,7 @@ REFRESH_MINUTES = int(os.environ.get("REFRESH_MINUTES", "30"))
 # 저장된 최신 결과
 _store = {
     "items": None,
+    "summary": {},
     "diag": "",
     "updated_at": None,   # datetime
     "refreshing": False,  # 수집 진행중 여부
@@ -36,7 +37,9 @@ async def _collect():
     _store["refreshing"] = True
     try:
         data = await scrape_all()
-        _store["items"] = extract_items(data)
+        result = extract_items(data)
+        _store["items"] = result.get("items", [])
+        _store["summary"] = result.get("summary", {})
         _store["diag"] = data.get("_진단", "")
         _store["updated_at"] = datetime.datetime.now()
         _store["error"] = ""
@@ -70,6 +73,7 @@ async def data():
     return JSONResponse({
         "today": datetime.date.today().isoformat(),
         "items": _store["items"] or [],
+        "summary": _store["summary"] or {},
         "diag": _store["diag"],
         "error": _store["error"],
         "refreshing": _store["refreshing"],
@@ -108,6 +112,13 @@ PAGE_HTML = """
   .stat { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 18px; min-width:130px; }
   .stat .n { font-size:24px; font-weight:700; }
   .stat .l { font-size:13px; color:var(--muted); margin-top:2px; }
+  .sales { display:flex; gap:12px; flex-wrap:wrap; margin:16px 0 6px; }
+  .scard { flex:1; min-width:200px; border-radius:16px; padding:18px 20px; color:#fff; }
+  .scard.main { background:linear-gradient(135deg,#2d6cdf,#5b8def); }
+  .scard.run { background:linear-gradient(135deg,#0f9d58,#3cbb7f); }
+  .scard .l { font-size:13px; opacity:.9; }
+  .scard .v { font-size:26px; font-weight:800; margin-top:4px; }
+  .scard .s { font-size:12px; opacity:.85; margin-top:4px; }
   .section-title { font-size:15px; font-weight:700; margin:22px 0 10px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
   .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; }
@@ -152,6 +163,7 @@ PAGE_HTML = """
   <div id="loading">최신 데이터를 준비하는 중입니다... 잠시만요 ⏳</div>
 
   <div id="content" style="display:none">
+    <div class="sales" id="sales"></div>
     <div class="summary" id="summary"></div>
     <div class="section-title">🟢 진행중</div>
     <div class="grid" id="running"></div>
@@ -205,9 +217,25 @@ function card(it){
   </div>`;
 }
 
+function won(n){ return (n||0).toLocaleString('ko-KR') + '원'; }
+
 function render(d){
   document.getElementById('diag').textContent = d.diag || d.error || '(없음)';
   const items = d.items || [];
+  const sm = d.summary || {};
+
+  document.getElementById('sales').innerHTML =
+    `<div class="scard main">
+       <div class="l">이번 달 총 판매금액</div>
+       <div class="v">${won(sm.total_sales)}</div>
+       <div class="s">진행중 + 진행예정 합계</div>
+     </div>
+     <div class="scard run">
+       <div class="l">진행중 판매금액</div>
+       <div class="v">${won(sm.running_sales)}</div>
+       <div class="s">현재 판매중인 협업 ${sm.running_count||0}건</div>
+     </div>`;
+
   const running = items.filter(x => (x.status||"").includes("진행중"));
   const soon    = items.filter(x => (x.status||"").includes("진행예정"));
   const other   = items.filter(x => !(x.status||"").includes("진행중") && !(x.status||"").includes("진행예정"));
