@@ -11,6 +11,7 @@ USERNAME = os.environ["ZVZO_USERNAME"]
 PASSWORD = os.environ["ZVZO_PASSWORD"]
 
 LIST_URL = "https://store.zvzo.shop/creator/cowork/?type=in-progress&page=1"
+FINISHED_URL = "https://store.zvzo.shop/creator/cowork/?type=finished&page=1"
 REPORT_URL = "https://store.zvzo.shop/report-pay/report/"
 MAX_SELLERS = int(os.environ.get("ZVZO_MAX_SELLERS", "8"))
 SETTINGS_BTN = "button:has-text('설정')"
@@ -273,6 +274,16 @@ async def scrape_all() -> dict:
                 except Exception:
                     pass
         results["상세"] = details
+
+        # (2-b) 진행완료 목록 (커미션 평균/카드에 반영). 상품 상세는 생략(텍스트만).
+        try:
+            await page.goto(FINISHED_URL, wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(2500)
+            results["완료목록"] = await page.inner_text("body")
+            log.append("진행완료 목록 수집")
+        except Exception as e:
+            results["완료목록"] = ""
+            log.append(f"진행완료 목록 실패: {str(e)[:50]}")
 
         # (3) 매출 통계
         results["매출통계"] = await _grab_report(page, log)

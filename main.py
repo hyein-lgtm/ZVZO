@@ -123,6 +123,7 @@ PAGE_HTML = """
   .badge { font-size:11px; padding:3px 8px; border-radius:999px; background:var(--chip); color:var(--blue); white-space:nowrap; }
   .badge.run { background:#e7f6ee; color:var(--green); }
   .badge.soon { background:#fef3e2; color:var(--amber); }
+  .badge.done { background:#eef0f3; color:#6b7280; }
   .row { display:flex; justify-content:space-between; font-size:13px; margin-top:8px; color:#333; }
   .row .k { color:var(--muted); }
   .amount { font-weight:700; }
@@ -217,7 +218,8 @@ function products(list){
 
 function card(it){
   const st = (it.status||"").includes("진행중") ? "run"
-           : (it.status||"").includes("진행예정") ? "soon" : "";
+           : (it.status||"").includes("진행예정") ? "soon"
+           : (it.status||"").includes("완료") ? "done" : "";
   return `<div class="card">
     <div class="top">
       <span><span class="seller">${it.seller||"-"}</span><span class="dday">${dday(it)}</span></span>
@@ -264,7 +266,7 @@ function renderMonth(){
      <div class="scard fee">
        <div class="l">${monthLabel(activeMonth)} 예상 수수료</div>
        <div class="v">${won(ms.fee)}</div>
-       <div class="s">순매출 × ${sm2.fee_rate||'-'}% (평균커미션 ${sm2.avg_commission||'-'}% + ZVZO 5%)</div>
+       <div class="s">순매출 × ${ms.fee_rate||'-'}% (이 달 진행 셀러 평균커미션 ${ms.avg_commission||'-'}% + ZVZO 5%)</div>
      </div>
      <div class="scard run">
        <div class="l">오늘 매출 (${DATA.today})</div>

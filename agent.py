@@ -79,8 +79,10 @@ def extract_items(scraped_data: dict) -> dict:
         "ZVZO 협업 목록 텍스트에서 각 협업 행을 화면에 나타난 순서 그대로 추출해 순수 JSON 배열만 출력.\n"
         '각 항목: {"seller":"셀러명(아이디)","status":"진행중|진행예정|기타",'
         '"period_start":"YYYY-MM-DD","period_end":"YYYY-MM-DD","amount":"판매금액 텍스트",'
-        '"product_count":"상품개수","discount_rate":"할인율","discount_type":"할인종류","boost":true/false}\n'
-        "boost는 'ZVZO 부스트 참여'면 true. 설명/코드펜스 금지. 없는 값은 빈 문자열."
+        '"product_count":"상품개수","discount_rate":"할인율","discount_type":"할인종류",'
+        '"commission":"커미션(예: 17%)","boost":true/false}\n'
+        "commission은 목록 맨 오른쪽 '커미션' 컬럼 값(예: 17%, 12%). boost는 'ZVZO 부스트 참여'면 true.\n"
+        "설명/코드펜스 금지. 없는 값은 빈 문자열."
     )
     msg = client.messages.create(
         model=MODEL, max_tokens=4000, system=system,
@@ -90,6 +92,30 @@ def extract_items(scraped_data: dict) -> dict:
         items = json.loads(_strip_fence(msg.content[0].text))
     except Exception:
         items = []
+
+    # 1-b) 진행완료 목록도 동일 방식으로 파싱해서 합침 (status=진행완료)
+    finished_text = scraped_data.get("완료목록", "")
+    if finished_text:
+        fsys = (
+            "ZVZO '진행완료' 협업 목록 텍스트에서 각 행을 순수 JSON 배열로만 출력.\n"
+            '각 항목: {"seller":"셀러명(아이디)","status":"진행완료",'
+            '"period_start":"YYYY-MM-DD","period_end":"YYYY-MM-DD","amount":"판매성과 금액 텍스트",'
+            '"product_count":"상품개수","discount_rate":"","discount_type":"할인타입",'
+            '"commission":"커미션(예: 25%)","boost":true/false}\n'
+            "commission은 '커미션' 컬럼 값(변경된 커미션이면 그 %). 설명/코드펜스 금지. 없는 값은 빈 문자열."
+        )
+        try:
+            fmsg = client.messages.create(
+                model=MODEL, max_tokens=4000, system=fsys,
+                messages=[{"role": "user", "content": f"오늘:{today}\n\n{finished_text[:15000]}"}],
+            )
+            finished_items = json.loads(_strip_fence(fmsg.content[0].text))
+            for fit in finished_items:
+                fit["status"] = "진행완료"
+                fit.setdefault("products", [])
+            items = items + finished_items
+        except Exception:
+            pass
 
     # 2) 상세를 순서대로 파싱
     parsed_products = []
@@ -111,9 +137,7 @@ def extract_items(scraped_data: dict) -> dict:
 
     # 5) 매출 통계(일자별) 파싱 → 순매출(주문합계-취소) + 월별 수수료 추정
     daily = _parse_report(scraped_data.get("매출통계", ""))
-    avg_comm = _avg_commission(items)        # 평균 커미션율 (소수)
-    ZVZO_FIXED = 0.05                          # ZVZO 고정 수수료 5%
-    fee_rate = avg_comm + ZVZO_FIXED           # 합산 수수료율
+    ZVZO_FIXED = 0.05  # ZVZO 고정 수수료 5%
 
     monthly = {}
     for day, info in daily.items():
@@ -123,8 +147,17 @@ def extract_items(scraped_data: dict) -> dict:
         b["cancel"] += info.get("cancel", 0)
         b["orders"] += info.get("orders", 0)
         b["net"] += info.get("net", 0)
+
+    # 월마다 '그 달에 진행한 셀러들의 평균 커미션' 으로 수수료 계산
     for m, b in monthly.items():
-        b["fee"] = round(b["net"] * fee_rate)   # 예상 수수료 = 순매출 × (평균커미션+5%)
+        avg_comm_m = _avg_commission(items, month=m)
+        fee_rate_m = avg_comm_m + ZVZO_FIXED
+        b["fee"] = round(b["net"] * fee_rate_m)
+        b["avg_commission"] = round(avg_comm_m * 100, 1)
+        b["fee_rate"] = round(fee_rate_m * 100, 1)
+
+    # 전체 평균(요약 표시용)
+    avg_comm_all = _avg_commission(items)
 
     return {
         "items": items,
@@ -134,11 +167,11 @@ def extract_items(scraped_data: dict) -> dict:
             "total_count": len(items),
             "running_count": sum(1 for it in items if "진행중" in (it.get("status", ""))),
             "soon_count": sum(1 for it in items if "진행예정" in (it.get("status", ""))),
-            "avg_commission": round(avg_comm * 100, 1),   # % 표시용
-            "fee_rate": round(fee_rate * 100, 1),         # 평균커미션+5%
+            "avg_commission": round(avg_comm_all * 100, 1),
+            "fee_rate": round((avg_comm_all + ZVZO_FIXED) * 100, 1),
         },
         "daily_sales": daily,
-        "monthly_sales": monthly,   # {"2026-06": {"sales","cancel","orders","net","fee"}}
+        "monthly_sales": monthly,   # {"2026-06": {sales,cancel,orders,net,fee,avg_commission,fee_rate}}
     }
 
 
@@ -155,15 +188,29 @@ def _commission_to_float(text):
         return None
 
 
-def _avg_commission(items):
-    """모든 상품의 커미션율 평균(소수). 없으면 0.12 기본값."""
+def _avg_commission(items, month=None):
+    """
+    선택한 달(month: 'YYYY-MM')과 판매기간이 겹치는 셀러들의 커미션 평균(소수).
+    month가 없으면 전체 셀러 평균. 커미션 정보가 없으면 0.12 기본값.
+    """
+    def overlaps(it):
+        if not month:
+            return True
+        ps = (it.get("period_start") or "")[:7]
+        pe = (it.get("period_end") or "")[:7]
+        if not ps and not pe:
+            return False
+        lo = ps or pe
+        hi = pe or ps
+        return lo <= month <= hi  # 시작월 ~ 종료월 사이에 해당 월이 들어오면 겹침
+
     rates = []
     for it in items:
-        for pr in it.get("products", []) or []:
-            r = _commission_to_float(pr.get("commission", ""))
-            if r is not None:
-                rates.append(r)
-        # 상품이 없으면 협업 자체 할인율은 커미션과 다르므로 사용하지 않음
+        if not overlaps(it):
+            continue
+        r = _commission_to_float(it.get("commission", ""))
+        if r is not None:
+            rates.append(r)
     if not rates:
         return 0.12
     return sum(rates) / len(rates)
