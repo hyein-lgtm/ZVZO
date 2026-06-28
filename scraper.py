@@ -1,10 +1,10 @@
 """
-ZVZO 협업 목록 + 셀러별 상세 모달 수집. (방식 B - 모달 내용 로딩 대기 강화 + 썸네일)
+ZVZO 협업 목록 + 셀러별 상세 모달 수집. (방식 B - article 기반 정밀 수집)
 
-핵심:
- - 모달을 연 뒤 '상품 관리' + 실제 상품 카드가 그려질 때까지 기다림
- - 모달 텍스트가 너무 짧으면(=아직 로딩 중) 더 기다렸다가 다시 긁음
- - 모달 안 상품 썸네일 이미지 URL도 함께 수집
+핵심 변경:
+ - 모달이 role=dialog 가 아니므로, 상품 카드인 <article> 들을 직접 찾아 수집.
+ - 각 article에서 텍스트 + 첫 이미지(썸네일 src)를 함께 추출.
+ - 모달 헤더의 '<셀러명> 추천 상품' 텍스트도 같이 잡아 매칭에 사용.
 """
 
 import os
@@ -42,13 +42,10 @@ async def _robust_click(page, locator, log, tag):
         await locator.scroll_into_view_if_needed(timeout=5000)
     except Exception:
         pass
-    for how, fn in [
-        ("일반", lambda: locator.click(timeout=4000)),
-        ("force", lambda: locator.click(force=True, timeout=4000)),
-    ]:
+    for fn in [lambda: locator.click(timeout=4000),
+               lambda: locator.click(force=True, timeout=4000)]:
         try:
-            await fn()
-            return True
+            await fn(); return True
         except Exception:
             continue
     try:
@@ -62,30 +59,53 @@ async def _robust_click(page, locator, log, tag):
     return False
 
 
-async def _grab_modal(page):
-    """모달 내용이 충분히 로딩될 때까지 기다린 뒤 텍스트 + 썸네일 수집."""
-    # 1) 상품 관리 + 가격 텍스트가 보일 때까지 시도
-    for _ in range(8):  # 최대 ~8초 추가 대기
-        # role=dialog 우선
-        dlg = page.locator("[role=dialog]")
-        target = dlg.first if await dlg.count() > 0 else page.locator("body")
+async def _grab_products(page):
+    """
+    모달이 뜬 상태에서 상품 카드(article)들을 직접 수집.
+    각 상품: {raw_text, thumb}
+    제목('OOO 추천 상품')도 함께 반환.
+    """
+    # 상품 카드가 그려질 때까지 대기 ('상품 관리' 또는 article 등장)
+    for _ in range(10):
+        cnt = await page.locator("article").count()
+        body = await page.inner_text("body")
+        if cnt > 0 and ("판매가" in body or "최종" in body or "커미션" in body):
+            break
+        await page.wait_for_timeout(800)
+
+    # 모달 제목(셀러명) 추출: '추천 상품'을 포함한 텍스트
+    title = ""
+    try:
+        t = page.locator("text=추천 상품").first
+        if await t.count() > 0:
+            title = (await t.inner_text()).strip()
+    except Exception:
+        pass
+
+    products = []
+    articles = page.locator("article")
+    acount = await articles.count()
+    for j in range(acount):
+        art = articles.nth(j)
         try:
-            txt = await target.inner_text()
+            txt = await art.inner_text()
         except Exception:
             txt = ""
-        # '판매가' 또는 '원' 가격 신호가 충분하면 완료로 간주
-        if len(txt) > 400 and ("판매가" in txt or "최종" in txt or "커미션" in txt):
-            # 썸네일 이미지 URL 수집 (모달 범위 내 img)
-            try:
-                imgs = await target.locator("img").evaluate_all(
-                    "els => els.map(e => e.src).filter(s => s && !s.startsWith('data:'))"
-                )
-            except Exception:
-                imgs = []
-            return txt, imgs
-        await page.wait_for_timeout(1000)
-    # 끝까지 부족하면 마지막으로 가진 것 반환
-    return txt, []
+        # '판매가/커미션/원' 신호가 있는 article만 상품으로 인정
+        if not any(k in txt for k in ["판매가", "커미션", "원"]):
+            continue
+        thumb = ""
+        try:
+            imgs = await art.locator("img").evaluate_all(
+                "els => els.map(e=>e.src).filter(s=>s && !s.startsWith('data:'))"
+            )
+            if imgs:
+                thumb = imgs[0]
+        except Exception:
+            pass
+        products.append({"raw_text": txt[:1500], "thumb": thumb})
+
+    return title, products
 
 
 async def scrape_all() -> dict:
@@ -116,26 +136,26 @@ async def scrape_all() -> dict:
             try:
                 btn = page.locator(SETTINGS_BTN).nth(i)
                 if not await _robust_click(page, btn, log, f"#{i+1}"):
-                    details.append({"text": f"(#{i+1} 클릭실패)", "imgs": []})
+                    details.append({"title": "", "products": []})
                     continue
-
                 try:
                     await page.wait_for_selector("text=상품 관리", timeout=8000)
                 except Exception:
                     await page.wait_for_timeout(1500)
 
-                txt, imgs = await _grab_modal(page)
-                details.append({"text": txt, "imgs": imgs})
-                log.append(f"#{i+1} 모달 {len(txt)}자, 이미지 {len(imgs)}개")
+                title, products = await _grab_products(page)
+                details.append({"title": title, "products": products})
+                log.append(f"#{i+1} '{title[:20]}' 상품 {len(products)}개")
 
                 await page.keyboard.press("Escape")
-                await page.wait_for_timeout(400)
-                if await page.locator("[role=dialog]").count() > 0:
+                await page.wait_for_timeout(500)
+                # 모달이 여전히 article을 많이 보이면 reload로 리셋
+                if await page.locator("article").count() > 0 and "상품 관리" in (await page.inner_text("body")):
                     await page.goto(LIST_URL, wait_until="networkidle", timeout=60000)
                     await page.wait_for_timeout(1500)
             except Exception as e:
-                details.append({"text": f"(#{i+1} 실패: {e})", "imgs": []})
-                log.append(f"#{i+1} 예외: {str(e)[:50]}")
+                details.append({"title": "", "products": []})
+                log.append(f"#{i+1} 예외: {str(e)[:60]}")
                 try:
                     await page.goto(LIST_URL, wait_until="networkidle", timeout=30000)
                     await page.wait_for_timeout(1000)
