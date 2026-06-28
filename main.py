@@ -105,6 +105,7 @@ PAGE_HTML = """
   .scard { flex:1; min-width:200px; border-radius:16px; padding:18px 20px; color:#fff; }
   .scard.main { background:linear-gradient(135deg,#2d6cdf,#5b8def); }
   .scard.run { background:linear-gradient(135deg,#0f9d58,#3cbb7f); }
+  .scard.fee { background:linear-gradient(135deg,#7c3aed,#9d6bf0); }
   .scard .l { font-size:13px; opacity:.9; }
   .scard .v { font-size:26px; font-weight:800; margin-top:4px; }
   .scard .s { font-size:12px; opacity:.85; margin-top:4px; }
@@ -250,16 +251,22 @@ function renderMonth(){
 
   let salesHTML;
   if (ms){
+    const sm2 = DATA.summary || {};
     salesHTML =
     `<div class="scard main">
-       <div class="l">${monthLabel(activeMonth)} 실매출</div>
-       <div class="v">${won(ms.sales)}</div>
-       <div class="s">주문 ${ (ms.orders||0).toLocaleString('ko-KR') }건 · 매출통계 기준(1일~)</div>
+       <div class="l">${monthLabel(activeMonth)} 순매출 (취소 제외)</div>
+       <div class="v">${won(ms.net)}</div>
+       <div class="s">주문합계 ${won(ms.sales)} − 취소 ${won(ms.cancel)} · 주문 ${(ms.orders||0).toLocaleString('ko-KR')}건</div>
+     </div>
+     <div class="scard fee">
+       <div class="l">${monthLabel(activeMonth)} 예상 수수료</div>
+       <div class="v">${won(ms.fee)}</div>
+       <div class="s">순매출 × ${sm2.fee_rate||'-'}% (평균커미션 ${sm2.avg_commission||'-'}% + ZVZO 5%)</div>
      </div>
      <div class="scard run">
        <div class="l">오늘 매출 (${DATA.today})</div>
-       <div class="v">${ todaySales ? won(todaySales.sales) : '—' }</div>
-       <div class="s">${ todaySales ? '주문 '+todaySales.orders+'건' : '오늘 데이터 없음' }</div>
+       <div class="v">${ todaySales ? won(todaySales.net) : '—' }</div>
+       <div class="s">${ todaySales ? '주문 '+todaySales.orders+'건 · 취소 '+won(todaySales.cancel) : '오늘 데이터 없음' }</div>
      </div>`;
   } else {
     // 매출통계가 없으면 협업 누적합으로 폴백

@@ -109,14 +109,22 @@ def extract_items(scraped_data: dict) -> dict:
         _won_to_int(it.get("amount", "")) for it in items if "진행중" in (it.get("status", ""))
     )
 
-    # 5) 매출 통계(일자별) 파싱 → 일자별/월별 실매출
+    # 5) 매출 통계(일자별) 파싱 → 순매출(주문합계-취소) + 월별 수수료 추정
     daily = _parse_report(scraped_data.get("매출통계", ""))
+    avg_comm = _avg_commission(items)        # 평균 커미션율 (소수)
+    ZVZO_FIXED = 0.05                          # ZVZO 고정 수수료 5%
+    fee_rate = avg_comm + ZVZO_FIXED           # 합산 수수료율
+
     monthly = {}
     for day, info in daily.items():
         m = day[:7]
-        b = monthly.setdefault(m, {"sales": 0, "orders": 0})
-        b["sales"] += info["sales"]
-        b["orders"] += info["orders"]
+        b = monthly.setdefault(m, {"sales": 0, "cancel": 0, "orders": 0, "net": 0})
+        b["sales"] += info.get("sales", 0)
+        b["cancel"] += info.get("cancel", 0)
+        b["orders"] += info.get("orders", 0)
+        b["net"] += info.get("net", 0)
+    for m, b in monthly.items():
+        b["fee"] = round(b["net"] * fee_rate)   # 예상 수수료 = 순매출 × (평균커미션+5%)
 
     return {
         "items": items,
@@ -126,37 +134,105 @@ def extract_items(scraped_data: dict) -> dict:
             "total_count": len(items),
             "running_count": sum(1 for it in items if "진행중" in (it.get("status", ""))),
             "soon_count": sum(1 for it in items if "진행예정" in (it.get("status", ""))),
+            "avg_commission": round(avg_comm * 100, 1),   # % 표시용
+            "fee_rate": round(fee_rate * 100, 1),         # 평균커미션+5%
         },
-        "daily_sales": daily,       # {"2026-06-28": {"sales":530838,"orders":22}, ...}
-        "monthly_sales": monthly,   # {"2026-06": {"sales":..., "orders":...}, ...}
+        "daily_sales": daily,
+        "monthly_sales": monthly,   # {"2026-06": {"sales","cancel","orders","net","fee"}}
     }
 
 
-def _parse_report(report_text):
+def _commission_to_float(text):
+    """'17%' -> 0.17 ; '-' or '' -> None"""
+    if not text:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1)) / 100.0
+    except Exception:
+        return None
+
+
+def _avg_commission(items):
+    """모든 상품의 커미션율 평균(소수). 없으면 0.12 기본값."""
+    rates = []
+    for it in items:
+        for pr in it.get("products", []) or []:
+            r = _commission_to_float(pr.get("commission", ""))
+            if r is not None:
+                rates.append(r)
+        # 상품이 없으면 협업 자체 할인율은 커미션과 다르므로 사용하지 않음
+    if not rates:
+        return 0.12
+    return sum(rates) / len(rates)
+
+
+def _find_col(headers, *keywords):
+    """헤더 목록에서 keyword가 포함된 컬럼 인덱스 반환. 없으면 -1."""
+    for i, h in enumerate(headers):
+        for kw in keywords:
+            if kw in (h or ""):
+                return i
+    return -1
+
+
+def _num(text):
+    if not text:
+        return 0
+    m = re.findall(r"[\d,]+", str(text))
+    if not m:
+        return 0
+    try:
+        return int(m[0].replace(",", ""))
+    except Exception:
+        return 0
+
+
+def _parse_report(report_data):
     """
-    매출 통계 페이지 텍스트에서 (날짜, 주문합계, 주문수)를 추출.
-    행 패턴: '2026-06-28  345  62  22  24  530838  다운로드' 같이
-    날짜 뒤에 숫자들이 이어진다. 마지막 큰 숫자를 '주문합계(매출)'로,
-    주문수는 LLM 없이 휴리스틱으로 잡는다.
-    반환: {"YYYY-MM-DD": {"sales": int, "orders": int}}
+    매출 통계(헤더+행)에서 일자별 {sales(주문합계), cancel(취소/환불), orders(주문수), net(순매출)} 추출.
+    헤더 이름으로 컬럼을 찾아 순서가 달라도 정확히 매칭. 구조 추출 실패 시 텍스트 정규식 폴백.
     """
-    import re
     result = {}
-    if not report_text:
-        return result
-    # 날짜로 시작하는 토막을 찾기 위해, 날짜 위치 기준으로 분할
-    # 한 줄에 날짜+숫자들이 공백/줄바꿈으로 섞여 있을 수 있어 정규식으로 처리
-    # 날짜 + 그 뒤 첫 6개 숫자(상품조회,쇼핑몰조회,주문수,품목수,주문합계) 가정
+    if not isinstance(report_data, dict):
+        report_data = {"headers": [], "rows": [], "text": str(report_data or "")}
+
+    headers = report_data.get("headers", []) or []
+    rows = report_data.get("rows", []) or []
+
+    if headers and rows:
+        i_date  = _find_col(headers, "날짜", "일자")
+        i_sales = _find_col(headers, "주문 합계", "주문합계", "매출", "결제")
+        i_cancel= _find_col(headers, "취소", "환불", "반품")
+        i_order = _find_col(headers, "주문 수", "주문수")
+        for r in rows:
+            if i_date < 0 or i_date >= len(r):
+                # 날짜 컬럼 못 찾으면 첫 셀이 날짜인지 검사
+                day_cell = r[0] if r else ""
+            else:
+                day_cell = r[i_date]
+            mday = re.search(r"\d{4}-\d{2}-\d{2}", day_cell or "")
+            if not mday:
+                continue
+            day = mday.group(0)
+            sales  = _num(r[i_sales])  if 0 <= i_sales  < len(r) else 0
+            cancel = _num(r[i_cancel]) if 0 <= i_cancel < len(r) else 0
+            orders = _num(r[i_order])  if 0 <= i_order  < len(r) else 0
+            net = max(sales - cancel, 0)
+            result[day] = {"sales": sales, "cancel": cancel, "orders": orders, "net": net}
+        if result:
+            return result
+
+    # 폴백: 텍스트에서 날짜+숫자 패턴 (취소 컬럼 위치 불명 → net=sales)
+    text = report_data.get("text", "") or ""
     pattern = re.compile(
-        r"(\d{4}-\d{2}-\d{2})\s+"
-        r"([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)"
+        r"(\d{4}-\d{2}-\d{2})\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)"
     )
-    for m in pattern.finditer(report_text):
-        day = m.group(1)
-        try:
-            orders = int(m.group(4).replace(",", ""))     # 주문 수
-            sales = int(m.group(6).replace(",", ""))      # 주문 합계(매출)
-        except Exception:
-            continue
-        result[day] = {"sales": sales, "orders": orders}
+    for mm in pattern.finditer(text):
+        day = mm.group(1)
+        orders = _num(mm.group(4))
+        sales = _num(mm.group(6))
+        result[day] = {"sales": sales, "cancel": 0, "orders": orders, "net": sales}
     return result

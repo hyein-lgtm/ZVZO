@@ -91,17 +91,44 @@ async def _grab_products(page):
 
 
 async def _grab_report(page, log):
-    """매출 통계 페이지에서 '이번 달 1일 ~ 오늘' 일자별 매출 텍스트 수집."""
+    """매출 통계 페이지에서 헤더 + 각 행 셀들을 구조적으로 수집."""
     try:
         await page.goto(REPORT_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(2500)
-        # 페이지 전체 텍스트를 가져와서 agent가 '날짜 + 주문합계'를 파싱
-        text = await page.inner_text("body")
-        log.append(f"매출 통계 수집 ({len(text)}자)")
-        return text
+        await page.wait_for_timeout(2800)
+
+        # 표 헤더와 행을 JS로 직접 추출 (table 우선, 없으면 grid/role 기반)
+        data = await page.evaluate(r"""
+        () => {
+          // 1) 표준 table 우선
+          const table = document.querySelector('table');
+          if (table) {
+            const ths = Array.from(table.querySelectorAll('thead th, thead td'))
+                          .map(e => e.innerText.trim());
+            const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
+              Array.from(tr.querySelectorAll('td,th')).map(td => td.innerText.trim())
+            );
+            if (rows.length) return { headers: ths, rows };
+          }
+          // 2) role=row / gridcell 기반
+          const rowsEl = Array.from(document.querySelectorAll('[role=row]'));
+          if (rowsEl.length) {
+            const all = rowsEl.map(r =>
+              Array.from(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],th,td'))
+                   .map(c => c.innerText.trim())
+            ).filter(a => a.length);
+            if (all.length) return { headers: all[0], rows: all.slice(1) };
+          }
+          // 3) 실패 시 전체 텍스트
+          return { headers: [], rows: [], text: document.body.innerText };
+        }
+        """)
+        hcnt = len(data.get("headers", []))
+        rcnt = len(data.get("rows", []))
+        log.append(f"매출 통계 수집: 헤더 {hcnt}개, 행 {rcnt}개")
+        return data
     except Exception as e:
         log.append(f"매출 통계 실패: {str(e)[:60]}")
-        return ""
+        return {"headers": [], "rows": [], "text": ""}
 
 
 async def scrape_all() -> dict:
