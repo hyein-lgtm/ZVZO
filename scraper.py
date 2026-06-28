@@ -90,88 +90,135 @@ async def _grab_products(page):
     return title, products
 
 
+async def _extract_table(page):
+    return await page.evaluate(r"""
+    () => {
+      const table = document.querySelector('table');
+      if (table) {
+        const ths = Array.from(table.querySelectorAll('thead th, thead td')).map(e=>e.innerText.trim());
+        const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
+          Array.from(tr.querySelectorAll('td,th')).map(td=>td.innerText.trim()));
+        return { headers: ths, rows };
+      }
+      const rowsEl = Array.from(document.querySelectorAll('[role=row]'));
+      if (rowsEl.length) {
+        const all = rowsEl.map(r =>
+          Array.from(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],th,td')).map(c=>c.innerText.trim())
+        ).filter(a=>a.length);
+        return { headers: all[0]||[], rows: all.slice(1) };
+      }
+      return { headers: [], rows: [], text: document.body.innerText };
+    }
+    """)
+
+
 async def _grab_report(page, log):
-    """매출 통계 페이지: 조회기간을 이번달 1일~오늘로 설정 + 검색 후 헤더/행 수집."""
+    """
+    매출 통계: 1일~오늘 전체 수집.
+    1) URL 쿼리로 기간 지정 시도(여러 파라미터명 후보) → 행 다수면 채택
+    2) 안 되면 달력 위젯 직접 입력 + 검색
+    3) 페이지네이션이 있으면 끝까지 넘기며 누적
+    """
+    today = datetime.date.today()
+    start_str = today.replace(day=1).isoformat()
+    end_str = today.isoformat()
+
+    async def collect_all_pages():
+        merged_headers = []
+        merged_rows = []
+        seen = set()
+        for _ in range(15):  # 최대 15페이지
+            d = await _extract_table(page)
+            if d.get("headers"):
+                merged_headers = d["headers"]
+            for r in d.get("rows", []):
+                key = "|".join(r)
+                if key not in seen:
+                    seen.add(key); merged_rows.append(r)
+            # 다음 페이지 버튼 시도
+            moved = False
+            for sel in ["button[aria-label*='다음']", "button:has-text('다음')",
+                        "a[aria-label*='Next']", "li.next button", "button[aria-label='Next page']"]:
+                nxt = page.locator(sel).first
+                try:
+                    if await nxt.count() > 0 and await nxt.is_enabled():
+                        await nxt.click()
+                        await page.wait_for_timeout(1500)
+                        moved = True
+                        break
+                except Exception:
+                    continue
+            if not moved:
+                break
+        return {"headers": merged_headers, "rows": merged_rows}
+
+    # ---- 1) URL 쿼리 시도 (ZVZO 정확한 파라미터: startDate/endDate/page/perPage) ----
+    best = {"headers": [], "rows": []}
+    seen = set()
+    merged_headers = []
+    merged_rows = []
+    try:
+        for pg in range(1, 16):  # 최대 15페이지
+            q = f"?page={pg}&perPage=200&startDate={start_str}&endDate={end_str}"
+            await page.goto(REPORT_URL + q, wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(2000)
+            d = await _extract_table(page)
+            if d.get("headers"):
+                merged_headers = d["headers"]
+            new_count = 0
+            for r in d.get("rows", []):
+                key = "|".join(r)
+                if key not in seen:
+                    seen.add(key); merged_rows.append(r); new_count += 1
+            log.append(f"page={pg} → 신규행 {new_count} (누적 {len(merged_rows)})")
+            if new_count == 0:
+                break  # 더 이상 새 데이터 없음
+        best = {"headers": merged_headers, "rows": merged_rows}
+        days1 = [c for row in merged_rows for c in row if start_str in c]
+        log.append(f"URL수집 완료: 행 {len(merged_rows)}, 1일포함 {bool(days1)}")
+        if merged_rows:
+            log.append(f"헤더={merged_headers}")
+            return best
+    except Exception as e:
+        log.append(f"URL수집 실패: {str(e)[:50]}")
+
+    # ---- 2) 달력 위젯 직접 입력 + 검색 ----
     try:
         await page.goto(REPORT_URL, wait_until="networkidle", timeout=60000)
         await page.wait_for_timeout(2500)
-
-        today = datetime.date.today()
-        first = today.replace(day=1)
-        start_str = first.isoformat()           # YYYY-MM-01
-        end_str = today.isoformat()
-
-        # 1) 날짜 입력칸에 기간 설정 시도 (date input 우선, 없으면 텍스트형)
-        try:
-            date_inputs = page.locator("input[type=date]")
-            if await date_inputs.count() >= 2:
-                await date_inputs.nth(0).fill(start_str)
-                await date_inputs.nth(1).fill(end_str)
-                log.append(f"조회기간 설정 {start_str}~{end_str}")
-            else:
-                # 텍스트형 입력칸: placeholder/value 패턴으로 추정
-                tis = page.locator("input")
-                # 'YYYY-MM-DD' 값을 가진 input 들을 찾아 채움
-                cand = []
-                for k in range(await tis.count()):
-                    v = await tis.nth(k).input_value()
-                    if v and len(v) >= 8 and "-" in v:
-                        cand.append(k)
-                if len(cand) >= 2:
-                    await tis.nth(cand[0]).fill(start_str)
-                    await tis.nth(cand[1]).fill(end_str)
-                    log.append(f"조회기간(텍스트) 설정 {start_str}~{end_str}")
-        except Exception as e:
-            log.append(f"조회기간 설정 실패(무시): {str(e)[:50]}")
-
-        # 2) 검색 버튼 클릭
-        try:
-            btn = page.locator("button:has-text('검색')").first
-            if await btn.count() > 0:
-                await btn.click()
-                await page.wait_for_load_state("networkidle", timeout=30000)
-                await page.wait_for_timeout(2000)
-                log.append("검색 클릭")
-        except Exception as e:
-            log.append(f"검색 클릭 실패(무시): {str(e)[:50]}")
-
-        # 3) '200개씩 보기'가 있으면 선택해 페이지 분할 방지
-        try:
-            sel = page.locator("select").first
-            if await sel.count() > 0:
-                await sel.select_option(label="200개씩 보기")
-                await page.wait_for_timeout(1500)
-                log.append("200개씩 보기 적용")
-        except Exception:
-            pass
-
-        # 4) 헤더 + 행 구조 추출
-        data = await page.evaluate(r"""
-        () => {
-          const table = document.querySelector('table');
-          if (table) {
-            const ths = Array.from(table.querySelectorAll('thead th, thead td')).map(e=>e.innerText.trim());
-            const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
-              Array.from(tr.querySelectorAll('td,th')).map(td=>td.innerText.trim()));
-            if (rows.length) return { headers: ths, rows };
-          }
-          const rowsEl = Array.from(document.querySelectorAll('[role=row]'));
-          if (rowsEl.length) {
-            const all = rowsEl.map(r =>
-              Array.from(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],th,td')).map(c=>c.innerText.trim())
-            ).filter(a=>a.length);
-            if (all.length) return { headers: all[0], rows: all.slice(1) };
-          }
-          return { headers: [], rows: [], text: document.body.innerText };
-        }
-        """)
-        hcnt = len(data.get("headers", []))
-        rcnt = len(data.get("rows", []))
-        log.append(f"매출 통계: 헤더 {hcnt}개, 행 {rcnt}개, 헤더={data.get('headers', [])}")
-        return data
+        ins = page.locator("input")
+        filled = 0
+        for k in range(await ins.count()):
+            try:
+                v = await ins.nth(k).input_value()
+            except Exception:
+                v = ""
+            if v and "-" in v and len(v) >= 8:  # 날짜형 input
+                target = start_str if filled == 0 else end_str
+                await ins.nth(k).click()
+                await ins.nth(k).fill("")
+                await ins.nth(k).type(target, delay=30)
+                await page.keyboard.press("Escape")
+                filled += 1
+                if filled >= 2:
+                    break
+        if filled:
+            log.append(f"달력 직접입력 {filled}칸")
+        btn = page.locator("button:has-text('검색')").first
+        if await btn.count() > 0:
+            await btn.click()
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page.wait_for_timeout(2000)
+            log.append("검색 클릭(달력방식)")
+        d = await collect_all_pages()
+        log.append(f"달력방식 결과 행 {len(d['rows'])}")
+        if len(d["rows"]) > len(best["rows"]):
+            best = d
     except Exception as e:
-        log.append(f"매출 통계 실패: {str(e)[:60]}")
-        return {"headers": [], "rows": [], "text": ""}
+        log.append(f"달력방식 실패: {str(e)[:50]}")
+
+    log.append(f"매출 최종 행 {len(best['rows'])}, 헤더={best.get('headers', [])}")
+    return best
 
 
 async def scrape_all() -> dict:
