@@ -115,6 +115,15 @@ PAGE_HTML = """
   .tab.active { background:var(--blue); color:#fff; border-color:var(--blue); font-weight:700; }
   .tab .cnt { font-size:12px; opacity:.8; margin-left:4px; }
   .mhead { font-size:14px; color:var(--muted); margin:14px 0 10px; }
+  .filters { display:flex; gap:8px; flex-wrap:wrap; margin:14px 0 4px; }
+  .filt { padding:7px 14px; border-radius:999px; border:1px solid var(--line); background:#fff;
+          font-size:13px; cursor:pointer; color:#444; }
+  .filt.on { color:#fff; font-weight:700; border-color:transparent; }
+  .filt.on.all { background:#16181d; }
+  .filt.on.run { background:var(--green); }
+  .filt.on.soon { background:var(--amber); }
+  .filt.on.done { background:#6b7280; }
+  .filt .c { opacity:.75; margin-left:4px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
   .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; }
   .card .top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -162,6 +171,7 @@ PAGE_HTML = """
   <div id="content" style="display:none">
     <div class="sales" id="sales"></div>
     <div class="tabs" id="tabs"></div>
+    <div class="filters" id="filters"></div>
     <div class="mhead" id="mhead"></div>
     <div class="grid" id="grid"></div>
   </div>
@@ -175,6 +185,16 @@ PAGE_HTML = """
 <script>
 let DATA = { items: [], summary: {}, today: "" };
 let activeMonth = null;
+let activeStatus = "all";  // all | run | soon | done
+
+function statusKey(it){
+  const s = it.status || "";
+  if (s.includes("진행중")) return "run";
+  if (s.includes("진행예정")) return "soon";
+  if (s.includes("완료")) return "done";
+  return "etc";
+}
+function selectStatus(s){ activeStatus = s; renderMonth(); }
 
 function won(n){ return (n||0).toLocaleString('ko-KR') + '원'; }
 
@@ -285,9 +305,28 @@ function renderMonth(){
   }
   document.getElementById('sales').innerHTML = salesHTML;
 
+  // 이 달 항목 (상태 카운트용 전체)
+  const monthAll = list;
+  const cnt = {
+    all: monthAll.length,
+    run: monthAll.filter(x=>statusKey(x)==="run").length,
+    soon: monthAll.filter(x=>statusKey(x)==="soon").length,
+    done: monthAll.filter(x=>statusKey(x)==="done").length,
+  };
+  // 상태 필터 버튼
+  const fdefs = [["all","전체"],["run","진행중"],["soon","진행예정"],["done","진행완료"]];
+  document.getElementById('filters').innerHTML = fdefs.map(([k,label]) =>
+    `<button class="filt ${activeStatus===k?'on '+k:''}" onclick="selectStatus('${k}')">${label}<span class="c">${cnt[k]}</span></button>`
+  ).join('');
+
+  // 선택 상태로 거르기
+  const shown = activeStatus==="all" ? monthAll : monthAll.filter(x=>statusKey(x)===activeStatus);
+  const stLabel = {all:"전체", run:"진행중", soon:"진행예정", done:"진행완료"}[activeStatus];
+
   document.getElementById('mhead').textContent =
-    `${monthLabel(activeMonth)}에 시작하는 협업 ${list.length}건 (시작일 빠른 순)`;
-  grid.innerHTML = list.map(card).join('') || '<div class="card">해당 월에 시작하는 협업이 없습니다.</div>';
+    `${monthLabel(activeMonth)} · ${stLabel} ${shown.length}건 (시작일 빠른 순)`;
+  document.getElementById('grid').innerHTML =
+    shown.map(card).join('') || '<div class="card">해당 항목이 없습니다.</div>';
   document.querySelectorAll('.tab').forEach(t => {
     t.classList.toggle('active', t.dataset.m === activeMonth);
   });
