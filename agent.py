@@ -117,17 +117,57 @@ def extract_items(scraped_data: dict) -> dict:
         except Exception:
             pass
 
-    # 2) 상세를 순서대로 파싱
-    parsed_products = []
-    for d in details:
+    # 2) 상세(진행 + 완료)를 파싱하고, 모달 제목(셀러명)으로 매칭 준비
+    details_all = (scraped_data.get("상세", []) or []) + (scraped_data.get("완료상세", []) or [])
+    parsed_details = []  # [(title, [products])]
+    for d in details_all:
         if isinstance(d, dict):
-            parsed_products.append(_parse_one_detail(d.get("title", ""), d.get("products", [])))
+            parsed_details.append((d.get("title", ""), _parse_one_detail(d.get("title", ""), d.get("products", []))))
         else:
-            parsed_products.append([])
+            parsed_details.append(("", []))
 
-    # 3) 순서 기반 1:1 매칭 (목록 i번째 ↔ 상세 i번째)
-    for i, it in enumerate(items):
-        it["products"] = parsed_products[i] if i < len(parsed_products) else []
+    # 3) 셀러명/아이디 기반 정확 매칭 (순서 의존 X)
+    import re as _re
+
+    def _name_keys(s):
+        """'youky (ykayjo)' → ['youky','ykayjo'] ; 'youky 추천 상품' → ['youky']"""
+        s = s or ""
+        keys = []
+        m = _re.search(r"\(([^)]+)\)", s)   # 괄호 안 아이디
+        if m:
+            keys.append(m.group(1).strip().lower())
+        # 앞쪽 이름 토막
+        head = s.split("(")[0].replace("추천 상품", "").replace("추천상품", "").strip()
+        if head:
+            keys.append(head.lower())
+        return [k for k in keys if k]
+
+    used = [False] * len(parsed_details)
+    for it in items:
+        it["products"] = []
+        seller_keys = _name_keys(it.get("seller", ""))
+        if not seller_keys:
+            continue
+        for di, (title, prods) in enumerate(parsed_details):
+            if used[di] or not prods:
+                continue
+            tkeys = _name_keys(title)
+            # 아이디(괄호값)나 이름이 서로 포함되면 같은 셀러로 판단
+            match = False
+            for sk in seller_keys:
+                for tk in tkeys:
+                    if sk and tk and (sk == tk or sk in title.lower() or tk in (it.get("seller","").lower())):
+                        match = True; break
+                if match: break
+            # 제목이 아이디를 직접 포함하는 경우도 매칭
+            if not match:
+                for sk in seller_keys:
+                    if sk and sk in (title or "").lower():
+                        match = True; break
+            if match:
+                it["products"] = prods
+                used[di] = True
+                break
 
     # 4) 협업 판매금액(누적) 합산 - 보조지표
     total = sum(_won_to_int(it.get("amount", "")) for it in items)

@@ -222,10 +222,48 @@ async def _grab_report(page, log):
     return best
 
 
+async def _collect_list(page, list_url, log, tag):
+    """주어진 목록 URL에서 목록 텍스트 + 셀러별 상세(title, products)를 수집."""
+    await page.goto(list_url, wait_until="networkidle", timeout=60000)
+    await page.wait_for_timeout(2500)
+    list_text = await page.inner_text("body")
+
+    total = await page.locator(SETTINGS_BTN).count()
+    n = min(total, MAX_SELLERS)
+    log.append(f"[{tag}] '설정' {total}개 → {n}개 상세 시도")
+
+    details = []
+    for i in range(n):
+        try:
+            btn = page.locator(SETTINGS_BTN).nth(i)
+            if not await _robust_click(page, btn, log, f"{tag}#{i+1}"):
+                details.append({"title": "", "products": []}); continue
+            try:
+                await page.wait_for_selector("text=상품 관리", timeout=8000)
+            except Exception:
+                await page.wait_for_timeout(1500)
+            title, products = await _grab_products(page)
+            details.append({"title": title, "products": products})
+            log.append(f"{tag}#{i+1} '{title[:16]}' 상품 {len(products)}개")
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+            if await page.locator("article").count() > 0 and "상품 관리" in (await page.inner_text("body")):
+                await page.goto(list_url, wait_until="networkidle", timeout=60000)
+                await page.wait_for_timeout(1500)
+        except Exception as e:
+            details.append({"title": "", "products": []})
+            log.append(f"{tag}#{i+1} 예외: {str(e)[:50]}")
+            try:
+                await page.goto(list_url, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+    return list_text, details
+
+
 async def scrape_all() -> dict:
     results = {}
     log = []
-    details = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -238,58 +276,21 @@ async def scrape_all() -> dict:
             results["_진단"] = "\n".join(log)
             return results
 
-        # (1) 협업 목록
-        await page.goto(LIST_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(2500)
-        results["진행목록"] = await page.inner_text("body")
-
-        total = await page.locator(SETTINGS_BTN).count()
-        n = min(total, MAX_SELLERS)
-        log.append(f"'설정' {total}개 → {n}개 시도")
-
-        # (2) 셀러별 상세
-        for i in range(n):
-            try:
-                btn = page.locator(SETTINGS_BTN).nth(i)
-                if not await _robust_click(page, btn, log, f"#{i+1}"):
-                    details.append({"title": "", "products": []}); continue
-                try:
-                    await page.wait_for_selector("text=상품 관리", timeout=8000)
-                except Exception:
-                    await page.wait_for_timeout(1500)
-                title, products = await _grab_products(page)
-                details.append({"title": title, "products": products})
-                log.append(f"#{i+1} '{title[:18]}' 상품 {len(products)}개")
-                await page.keyboard.press("Escape")
-                await page.wait_for_timeout(500)
-                if await page.locator("article").count() > 0 and "상품 관리" in (await page.inner_text("body")):
-                    await page.goto(LIST_URL, wait_until="networkidle", timeout=60000)
-                    await page.wait_for_timeout(1500)
-            except Exception as e:
-                details.append({"title": "", "products": []})
-                log.append(f"#{i+1} 예외: {str(e)[:50]}")
-                try:
-                    await page.goto(LIST_URL, wait_until="networkidle", timeout=30000)
-                    await page.wait_for_timeout(1000)
-                except Exception:
-                    pass
+        # (1) 진행중/진행예정 목록 + 셀러 상세
+        list_text, details = await _collect_list(page, LIST_URL, log, "진행")
+        results["진행목록"] = list_text
         results["상세"] = details
 
-        # (2-b) 진행완료 목록 (커미션 평균/카드에 반영). 상품 상세는 생략(텍스트만).
-        try:
-            await page.goto(FINISHED_URL, wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(2500)
-            results["완료목록"] = await page.inner_text("body")
-            log.append("진행완료 목록 수집")
-        except Exception as e:
-            results["완료목록"] = ""
-            log.append(f"진행완료 목록 실패: {str(e)[:50]}")
+        # (2) 진행완료 목록 + 셀러 상세 (구리 등 완료 셀러 상품도 수집)
+        f_text, f_details = await _collect_list(page, FINISHED_URL, log, "완료")
+        results["완료목록"] = f_text
+        results["완료상세"] = f_details
 
         # (3) 매출 통계
         results["매출통계"] = await _grab_report(page, log)
 
         await browser.close()
 
-    log.append(f"상세 {len(details)}건")
+    log.append(f"진행상세 {len(details)}건, 완료상세 {len(f_details)}건")
     results["_진단"] = "\n".join(log)
     return results
