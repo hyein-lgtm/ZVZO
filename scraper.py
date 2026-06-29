@@ -79,6 +79,24 @@ async def _grab_products(page):
         except Exception:
             continue
 
+    # 모달 안에서 인스타그램 링크 수집 (a[href*=instagram] 또는 텍스트 내 URL)
+    insta = ""
+    try:
+        hrefs = await page.locator("a").evaluate_all(
+            "els => els.map(e=>e.href).filter(h => h && h.toLowerCase().includes('instagram.com'))")
+        if hrefs:
+            insta = hrefs[0]
+    except Exception:
+        pass
+    if not insta:
+        try:
+            body = await page.inner_text("body")
+            m = __import__("re").search(r"https?://[^\s]*instagram\.com/[A-Za-z0-9_.]+", body)
+            if m:
+                insta = m.group(0)
+        except Exception:
+            pass
+
     products = []
     arts = page.locator("article")
     for j in range(await arts.count()):
@@ -87,7 +105,6 @@ async def _grab_products(page):
             txt = await art.inner_text()
         except Exception:
             txt = ""
-        # 상품 카드 판정: 가격(원) 또는 커미션/판매가 신호가 있거나, 이미지가 있는 카드
         has_signal = any(k in txt for k in ["판매가", "커미션", "원", "최종"])
         thumb = ""
         try:
@@ -100,7 +117,7 @@ async def _grab_products(page):
         if not has_signal and not thumb:
             continue
         products.append({"raw_text": txt[:1500], "thumb": thumb})
-    return title, products
+    return title, products, insta
 
 
 async def _extract_table(page):
@@ -280,8 +297,8 @@ async def _collect_list(page, list_url, log, tag):
             except Exception:
                 await page.wait_for_timeout(2000)
 
-            title, products = await _grab_products(page)
-            details.append({"seller": seller, "title": title, "products": products})
+            title, products, insta = await _grab_products(page)
+            details.append({"seller": seller, "title": title, "products": products, "instagram": insta})
             log.append(f"{tag}#{i+1} 셀러='{seller[:18]}' 제목='{title[:14]}' 상품 {len(products)}개")
 
             await page.keyboard.press("Escape")

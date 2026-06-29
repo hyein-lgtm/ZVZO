@@ -128,6 +128,8 @@ PAGE_HTML = """
   .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; }
   .card .top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .seller { font-weight:700; font-size:15px; }
+  a.seller.link { color:var(--blue); text-decoration:none; }
+  a.seller.link:hover { text-decoration:underline; }
   .dday { font-size:11px; color:var(--muted); margin-left:6px; }
   .badge { font-size:11px; padding:3px 8px; border-radius:999px; background:var(--chip); color:var(--blue); white-space:nowrap; }
   .badge.run { background:#e7f6ee; color:var(--green); }
@@ -240,9 +242,12 @@ function card(it){
   const st = (it.status||"").includes("진행중") ? "run"
            : (it.status||"").includes("진행예정") ? "soon"
            : (it.status||"").includes("완료") ? "done" : "";
+  const sellerHTML = it.instagram
+    ? `<a class="seller link" href="${it.instagram}" target="_blank" rel="noopener">${it.seller||"-"} ↗</a>`
+    : `<span class="seller">${it.seller||"-"}</span>`;
   return `<div class="card">
     <div class="top">
-      <span><span class="seller">${it.seller||"-"}</span><span class="dday">${dday(it)}</span></span>
+      <span>${sellerHTML}<span class="dday">${dday(it)}</span></span>
       <span class="badge ${st}">${it.status||"-"}</span>
     </div>
     ${it.boost ? '<span class="boost">⚡ ZVZO 부스트 참여</span>' : ''}

@@ -117,15 +117,19 @@ def extract_items(scraped_data: dict) -> dict:
         except Exception:
             pass
 
-    # 2) 상세(진행 + 완료)를 파싱. 각 상세의 셀러명은 행에서 캡처한 seller 우선, 없으면 title.
+    # 2) 상세(진행 + 완료)를 파싱. seller 우선, 인스타 링크도 보존.
     details_all = (scraped_data.get("상세", []) or []) + (scraped_data.get("완료상세", []) or [])
-    parsed_details = []  # [(name_source, [products])]
+    parsed_details = []  # [(name_source, [products], instagram)]
     for d in details_all:
         if isinstance(d, dict):
             name_src = d.get("seller") or d.get("title") or ""
-            parsed_details.append((name_src, _parse_one_detail(d.get("title", ""), d.get("products", []))))
+            parsed_details.append((
+                name_src,
+                _parse_one_detail(d.get("title", ""), d.get("products", [])),
+                d.get("instagram", "") or "",
+            ))
         else:
-            parsed_details.append(("", []))
+            parsed_details.append(("", [], ""))
 
     # 3) 셀러 매칭: 아이디(괄호 안 영문) 정확일치 우선 → 없으면 이름 일치
     import re as _re
@@ -140,36 +144,40 @@ def extract_items(scraped_data: dict) -> dict:
             s = s.replace(junk, "")
         return s.strip().lower()
 
-    # 상세 인덱스를 아이디/이름으로 미리 정리
     used = [False] * len(parsed_details)
 
     def take(pred):
-        for di, (name_src, prods) in enumerate(parsed_details):
+        for di, (name_src, prods, insta) in enumerate(parsed_details):
             if used[di] or not prods:
                 continue
             if pred(name_src):
                 used[di] = True
-                return prods
-        return None
+                return prods, insta
+        return None, ""
 
     for it in items:
         it["products"] = []
         sid = _id_of(it.get("seller", ""))
         sname = _name_of(it.get("seller", ""))
 
-        prods = None
-        # (1) 아이디 정확 일치 (가장 신뢰도 높음, 고유값)
+        prods, insta = None, ""
         if sid:
-            prods = take(lambda src: _id_of(src) == sid)
-        # (2) 이름 정확 일치
+            prods, insta = take(lambda src: _id_of(src) == sid)
         if prods is None and sname:
-            prods = take(lambda src: _name_of(src) == sname)
-        # (3) 이름 부분 포함 (마지막 보루)
+            prods, insta = take(lambda src: _name_of(src) == sname)
         if prods is None and sname:
-            prods = take(lambda src: sname and (sname in _name_of(src) or _name_of(src) in sname))
+            prods, insta = take(lambda src: sname and (sname in _name_of(src) or _name_of(src) in sname))
 
         if prods is not None:
             it["products"] = prods
+
+        # 인스타 링크: 모달에서 긁은 게 있으면 그것, 없으면 괄호 아이디로 생성
+        if insta:
+            it["instagram"] = insta
+        elif sid:
+            it["instagram"] = f"https://instagram.com/{sid}"
+        else:
+            it["instagram"] = ""
 
     # 4) 협업 판매금액(누적) 합산 - 보조지표
     total = sum(_won_to_int(it.get("amount", "")) for it in items)
