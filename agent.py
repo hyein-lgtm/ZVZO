@@ -171,11 +171,14 @@ def extract_items(scraped_data: dict) -> dict:
         if prods is not None:
             it["products"] = prods
 
-        # 인스타 링크: 모달에서 긁은 게 있으면 그것, 없으면 괄호 아이디로 생성
-        if insta:
-            it["instagram"] = insta
-        elif sid:
+        # 인스타 링크: 아이디 기반 프로필을 우선. 모달 링크는 '프로필' 형태일 때만 사용.
+        def _is_profile(u):
+            u = (u or "").lower()
+            return ("instagram.com/" in u) and not any(x in u for x in ["/p/", "/reel/", "/explore", "/stories/"])
+        if sid:
             it["instagram"] = f"https://instagram.com/{sid}"
+        elif insta and _is_profile(insta):
+            it["instagram"] = insta
         else:
             it["instagram"] = ""
 

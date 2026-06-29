@@ -79,23 +79,24 @@ async def _grab_products(page):
         except Exception:
             continue
 
-    # 모달 안에서 인스타그램 링크 수집 (a[href*=instagram] 또는 텍스트 내 URL)
+    # 모달 안에서 인스타그램 '프로필' 링크만 수집 (게시물 /p/, 릴스 /reel/ 는 제외)
     insta = ""
+    def _is_profile(u):
+        u = (u or "").lower()
+        if "instagram.com/" not in u:
+            return False
+        if "/p/" in u or "/reel/" in u or "/explore" in u or "/stories/" in u:
+            return False
+        return True
     try:
         hrefs = await page.locator("a").evaluate_all(
             "els => els.map(e=>e.href).filter(h => h && h.toLowerCase().includes('instagram.com'))")
-        if hrefs:
-            insta = hrefs[0]
+        for h in hrefs:
+            if _is_profile(h):
+                insta = h
+                break
     except Exception:
         pass
-    if not insta:
-        try:
-            body = await page.inner_text("body")
-            m = __import__("re").search(r"https?://[^\s]*instagram\.com/[A-Za-z0-9_.]+", body)
-            if m:
-                insta = m.group(0)
-        except Exception:
-            pass
 
     products = []
     arts = page.locator("article")
